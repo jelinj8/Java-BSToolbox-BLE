@@ -46,6 +46,7 @@ public class BleAdapter implements AutoCloseable {
 	private final Map<String, BlePeripheral> peripherals = new ConcurrentHashMap<>();
 	private volatile BleScanListener scanListener;
 	private volatile boolean alive = true;
+	private volatile boolean closing = false;
 
 	public BleAdapter() throws BleSidecarException {
 		java.io.File binary = NativeBinaryLoader.extract();
@@ -106,6 +107,7 @@ public class BleAdapter implements AutoCloseable {
 
 	@Override
 	public void close() {
+		closing = true;
 		alive = false;
 		try {
 			stdin.close();
@@ -225,6 +227,11 @@ public class BleAdapter implements AutoCloseable {
 			return;
 		}
 		alive = false;
+		if (closing) {
+			// close() already owns tearing down pending requests/peripherals for an intentional
+			// shutdown - reporting "sidecar_crashed" here would be a lie.
+			return;
+		}
 		failAllPending("ble-bridge sidecar process exited unexpectedly");
 		for (BlePeripheral p : peripherals.values()) {
 			p.fireDisconnected("sidecar_crashed");
