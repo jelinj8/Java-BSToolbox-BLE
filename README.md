@@ -16,6 +16,12 @@ JSON on stdin/stdout. If the sidecar crashes or hangs, that surfaces as a normal
 It also sidesteps SimpleBLE's BUSL-1.1 licensing (commercial use requires a paid license);
 `btleplug` is MIT/Apache-2.0.
 
+**Pairing/bonding is out of scope.** If a peripheral's GATT requires OS-level bonding (MITM
+protection, a PIN prompt, etc — as MeshCore's own companion_radio firmware does), that has to
+happen through the OS's own Bluetooth settings before this library can connect to it. Neither
+`btleplug` nor a from-scratch pairing implementation is wired up here; `connect()` against an
+unpaired-but-bonding-required device will simply fail with a clear error.
+
 ## Modules
 
 - `ble-bridge/` — the Rust sidecar (`cargo build --release`). Prebuilt binaries for each

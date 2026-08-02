@@ -21,14 +21,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
 /**
- * Entry point for this library. Launches and owns one {@code ble-bridge} sidecar process (a
- * bundled Rust/btleplug binary, see {@link NativeBinaryLoader}) and speaks newline-delimited JSON
- * with it over stdin/stdout.
+ * Entry point for this library. Launches and owns one {@code ble-bridge}
+ * sidecar process (a bundled Rust/btleplug binary, see
+ * {@link NativeBinaryLoader}) and speaks newline-delimited JSON with it over
+ * stdin/stdout.
  * <p>
- * The sidecar exists specifically so a native/driver-level BLE fault can't take this JVM down
- * with it: a crash surfaces as {@link BleSidecarException} / {@link DisconnectListener#onDisconnected}
- * with reason {@code "sidecar_crashed"}, never as a JVM crash. Create one {@code BleAdapter} per
- * BLE session; call {@link #close()} when done with it.
+ * The sidecar exists specifically so a native/driver-level BLE fault can't take
+ * this JVM down with it: a crash surfaces as {@link BleSidecarException} /
+ * {@link DisconnectListener#onDisconnected} with reason
+ * {@code "sidecar_crashed"}, never as a JVM crash. Create one
+ * {@code BleAdapter} per BLE session; call {@link #close()} when done with it.
  */
 public class BleAdapter implements AutoCloseable {
 
@@ -70,8 +72,9 @@ public class BleAdapter implements AutoCloseable {
 	}
 
 	/**
-	 * Scans for nearby peripherals for {@code timeoutMs} milliseconds, reporting each one found
-	 * to {@code listener}. Blocks until the sidecar confirms scanning has stopped.
+	 * Scans for nearby peripherals for {@code timeoutMs} milliseconds, reporting
+	 * each one found to {@code listener}. Blocks until the sidecar confirms
+	 * scanning has stopped.
 	 */
 	public void scan(ScanFilter filter, long timeoutMs, BleScanListener listener) throws BleException {
 		this.scanListener = listener;
@@ -120,7 +123,8 @@ public class BleAdapter implements AutoCloseable {
 		failAllPending("adapter closed");
 	}
 
-	// --- internals used by BlePeripheral -----------------------------------------------------
+	// --- internals used by BlePeripheral
+	// -----------------------------------------------------
 
 	JsonNode sendRequest(String cmd, Map<String, Object> fields, long timeoutMs) throws BleException {
 		ObjectNode node = mapper.createObjectNode();
@@ -179,10 +183,12 @@ public class BleAdapter implements AutoCloseable {
 		}
 	}
 
-	// --- background threads -------------------------------------------------------------------
+	// --- background threads
+	// -------------------------------------------------------------------
 
 	private void readLoop() {
-		try (BufferedReader in = new BufferedReader(new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
+		try (BufferedReader in = new BufferedReader(
+				new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
 			String line;
 			while ((line = in.readLine()) != null) {
 				if (line.trim().isEmpty()) {
@@ -200,7 +206,8 @@ public class BleAdapter implements AutoCloseable {
 	}
 
 	private void stderrLoop() {
-		try (BufferedReader err = new BufferedReader(new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
+		try (BufferedReader err = new BufferedReader(
+				new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
 			String line;
 			while ((line = err.readLine()) != null) {
 				LOG.fine("[ble-bridge] " + line);
@@ -248,7 +255,8 @@ public class BleAdapter implements AutoCloseable {
 		case "notification":
 			BlePeripheral np = peripherals.get(node.path("address").asText(""));
 			if (np != null) {
-				np.fireNotification(node.path("char_uuid").asText(""), HexCodec.decode(node.path("value_hex").asText("")));
+				np.fireNotification(node.path("char_uuid").asText(""),
+						HexCodec.decode(node.path("value_hex").asText("")));
 			}
 			break;
 		case "disconnected":
@@ -258,7 +266,8 @@ public class BleAdapter implements AutoCloseable {
 			}
 			break;
 		case "connected":
-			// informational only - the connect() call itself resolves the corresponding request future.
+			// informational only - the connect() call itself resolves the corresponding
+			// request future.
 			break;
 		case "fatal":
 		case "error":

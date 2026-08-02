@@ -10,9 +10,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import com.fasterxml.jackson.databind.JsonNode;
 
 /**
- * A handle to one BLE peripheral, obtained via {@link BleAdapter#getPeripheral(String)}. One
- * instance is cached per address for the lifetime of its {@link BleAdapter}, so listeners
- * registered here keep receiving events across reconnects.
+ * A handle to one BLE peripheral, obtained via
+ * {@link BleAdapter#getPeripheral(String)}. One instance is cached per address
+ * for the lifetime of its {@link BleAdapter}, so listeners registered here keep
+ * receiving events across reconnects.
  */
 public class BlePeripheral {
 
@@ -66,11 +67,13 @@ public class BlePeripheral {
 	}
 
 	public byte[] readCharacteristic(String serviceUuid, String charUuid) throws BleException {
-		JsonNode resp = adapter.sendRequest("read", fields("address", address, "service_uuid", serviceUuid, "char_uuid", charUuid), DEFAULT_TIMEOUT_MS);
+		JsonNode resp = adapter.sendRequest("read",
+				fields("address", address, "service_uuid", serviceUuid, "char_uuid", charUuid), DEFAULT_TIMEOUT_MS);
 		return HexCodec.decode(resp.path("value_hex").asText(""));
 	}
 
-	public void writeCharacteristic(String serviceUuid, String charUuid, byte[] value, boolean withResponse) throws BleException {
+	public void writeCharacteristic(String serviceUuid, String charUuid, byte[] value, boolean withResponse)
+			throws BleException {
 		Map<String, Object> f = fields("address", address, "service_uuid", serviceUuid, "char_uuid", charUuid);
 		f.put("value_hex", HexCodec.encode(value));
 		f.put("with_response", withResponse);
@@ -79,20 +82,26 @@ public class BlePeripheral {
 
 	public void subscribe(String serviceUuid, String charUuid, NotificationListener listener) throws BleException {
 		notificationListeners.put(charUuid.toUpperCase(Locale.ROOT), listener);
-		adapter.sendRequest("subscribe", fields("address", address, "service_uuid", serviceUuid, "char_uuid", charUuid), DEFAULT_TIMEOUT_MS);
+		adapter.sendRequest("subscribe", fields("address", address, "service_uuid", serviceUuid, "char_uuid", charUuid),
+				DEFAULT_TIMEOUT_MS);
 	}
 
 	public void unsubscribe(String serviceUuid, String charUuid) throws BleException {
-		adapter.sendRequest("unsubscribe", fields("address", address, "service_uuid", serviceUuid, "char_uuid", charUuid), DEFAULT_TIMEOUT_MS);
+		adapter.sendRequest("unsubscribe",
+				fields("address", address, "service_uuid", serviceUuid, "char_uuid", charUuid), DEFAULT_TIMEOUT_MS);
 		notificationListeners.remove(charUuid.toUpperCase(Locale.ROOT));
 	}
 
-	/** Fires whenever this peripheral drops - see {@link DisconnectListener} for the crash-isolation case. */
+	/**
+	 * Fires whenever this peripheral drops - see {@link DisconnectListener} for the
+	 * crash-isolation case.
+	 */
 	public void setDisconnectListener(DisconnectListener listener) {
 		this.disconnectListener = listener;
 	}
 
-	// --- internals used by BleAdapter's reader thread -----------------------------------------
+	// --- internals used by BleAdapter's reader thread
+	// -----------------------------------------
 
 	void fireNotification(String charUuid, byte[] value) {
 		NotificationListener l = notificationListeners.get(charUuid.toUpperCase(Locale.ROOT));

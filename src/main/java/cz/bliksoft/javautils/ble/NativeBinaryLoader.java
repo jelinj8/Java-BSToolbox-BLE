@@ -8,10 +8,11 @@ import java.nio.file.Files;
 import java.util.Locale;
 
 /**
- * Extracts the platform-appropriate {@code ble-bridge} binary bundled as a classpath resource
- * (built separately per OS/arch by the {@code ble-bridge} Rust crate) to a temp file so it can be
- * launched with {@link ProcessBuilder}. No BLE library or runtime needs to be pre-installed on
- * the target machine - the binary is fully self-contained.
+ * Extracts the platform-appropriate {@code ble-bridge} binary bundled as a
+ * classpath resource (built separately per OS/arch by the {@code ble-bridge}
+ * Rust crate) to a temp file so it can be launched with {@link ProcessBuilder}.
+ * No BLE library or runtime needs to be pre-installed on the target machine -
+ * the binary is fully self-contained.
  */
 final class NativeBinaryLoader {
 
@@ -26,7 +27,8 @@ final class NativeBinaryLoader {
 
 		try (InputStream in = NativeBinaryLoader.class.getResourceAsStream(resourcePath)) {
 			if (in == null) {
-				throw new BleSidecarException("no bundled ble-bridge binary for " + platformDir + " (expected classpath resource " + resourcePath + ")");
+				throw new BleSidecarException("no bundled ble-bridge binary for " + platformDir
+						+ " (expected classpath resource " + resourcePath + ")");
 			}
 			File tmp = File.createTempFile("ble-bridge-", windows ? ".exe" : "");
 			tmp.deleteOnExit();

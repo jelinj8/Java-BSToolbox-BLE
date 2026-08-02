@@ -17,7 +17,10 @@ public class BleCharacteristic {
 		return uuid;
 	}
 
-	/** e.g. {@code READ}, {@code WRITE}, {@code WRITE_WITHOUT_RESPONSE}, {@code NOTIFY}, {@code INDICATE}. */
+	/**
+	 * e.g. {@code READ}, {@code WRITE}, {@code WRITE_WITHOUT_RESPONSE},
+	 * {@code NOTIFY}, {@code INDICATE}.
+	 */
 	public List<String> getProperties() {
 		return properties;
 	}

@@ -1,6 +1,9 @@
 package cz.bliksoft.javautils.ble;
 
-/** Matches the hex encoding used on the wire by the ble-bridge sidecar (lowercase, no separators). */
+/**
+ * Matches the hex encoding used on the wire by the ble-bridge sidecar
+ * (lowercase, no separators).
+ */
 final class HexCodec {
 
 	private static final char[] HEX = "0123456789abcdef".toCharArray();

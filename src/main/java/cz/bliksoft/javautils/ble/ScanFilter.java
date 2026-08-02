@@ -1,6 +1,9 @@
 package cz.bliksoft.javautils.ble;
 
-/** Optional narrowing for {@link BleAdapter#scan}. Leave {@link #serviceUuid} null to see everything. */
+/**
+ * Optional narrowing for {@link BleAdapter#scan}. Leave {@link #serviceUuid}
+ * null to see everything.
+ */
 public class ScanFilter {
 
 	private String serviceUuid;
