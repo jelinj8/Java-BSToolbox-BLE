@@ -17,11 +17,14 @@ import com.fasterxml.jackson.databind.JsonNode;
  */
 public class BlePeripheral {
 
-	private static final long CONNECT_TIMEOUT_MS = 20000;
-	// Subscribing to a characteristic that requires an authenticated/bonded link can involve
-	// Windows finishing security-upgrade negotiation first, especially right after a fresh pair -
-	// observed taking notably longer than plain GATT operations against real hardware.
-	private static final long DEFAULT_TIMEOUT_MS = 30000;
+	// Must exceed the sidecar's own worst-case retry budget for a GATT op (ble-bridge's
+	// retry_gatt: 8 attempts x 3s + 7x500ms delay =~ 27.5s), or the Java side gives up and times
+	// out before the sidecar's retries - which work around a Windows post-pairing IRK-resolution
+	// hang - even get a chance to finish. Confirmed necessary against real hardware: with this at
+	// 20s, discoverServices() failed identically whether the sidecar-side fix worked or not,
+	// because Java's own timeout fired first.
+	private static final long CONNECT_TIMEOUT_MS = 40000;
+	private static final long DEFAULT_TIMEOUT_MS = 40000;
 
 	private final BleAdapter adapter;
 	private final String address;
