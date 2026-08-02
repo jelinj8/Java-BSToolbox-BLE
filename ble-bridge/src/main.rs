@@ -150,7 +150,17 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		}
 		Command::StopScan { id } => respond(&tx, &id, state.adapter.stop_scan().await.map(|_| json!({}))),
 		Command::Connect { id, address } => match get_peripheral(&state, &address).await {
-			Ok(p) => respond(&tx, &id, p.connect().await.map(|_| json!({}))),
+			Ok(p) => {
+				let p2 = p.clone();
+				match retry_gatt("connect", || p2.connect()).await {
+					Ok(_) => {
+						let _ = tx.send(ok_response(&id, json!({})));
+					}
+					Err(e) => {
+						let _ = tx.send(err_response(&id, e));
+					}
+				}
+			}
 			Err(e) => tx.send(err_response(&id, e)).ok().unwrap_or(()),
 		},
 		Command::Disconnect { id, address } => match get_peripheral(&state, &address).await {
@@ -159,8 +169,9 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		},
 		Command::DiscoverServices { id, address } => match get_peripheral(&state, &address).await {
 			Ok(p) => {
-				if let Err(e) = p.discover_services().await {
-					let _ = tx.send(err_response(&id, e.to_string()));
+				let p2 = p.clone();
+				if let Err(e) = retry_gatt("discover_services", || p2.discover_services()).await {
+					let _ = tx.send(err_response(&id, e));
 					return;
 				}
 				let services: Vec<Value> = p
@@ -184,12 +195,12 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		},
 		Command::Read { id, address, service_uuid, char_uuid } => {
 			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
-				Ok((p, c)) => match p.read(&c).await {
+				Ok((p, c)) => match retry_gatt("read", || p.read(&c)).await {
 					Ok(bytes) => {
 						let _ = tx.send(ok_response(&id, json!({ "value_hex": hex_encode(&bytes) })));
 					}
 					Err(e) => {
-						let _ = tx.send(err_response(&id, e.to_string()));
+						let _ = tx.send(err_response(&id, e));
 					}
 				},
 				Err(e) => {
@@ -208,7 +219,14 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
 				Ok((p, c)) => {
 					let wt = if with_response { WriteType::WithResponse } else { WriteType::WithoutResponse };
-					respond(&tx, &id, p.write(&c, &bytes, wt).await.map(|_| json!({})));
+					match retry_gatt("write", || p.write(&c, &bytes, wt)).await {
+						Ok(_) => {
+							let _ = tx.send(ok_response(&id, json!({})));
+						}
+						Err(e) => {
+							let _ = tx.send(err_response(&id, e));
+						}
+					}
 				}
 				Err(e) => {
 					let _ = tx.send(err_response(&id, e));
@@ -217,7 +235,14 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		}
 		Command::Subscribe { id, address, service_uuid, char_uuid } => {
 			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
-				Ok((p, c)) => respond(&tx, &id, p.subscribe(&c).await.map(|_| json!({}))),
+				Ok((p, c)) => match retry_gatt("subscribe", || p.subscribe(&c)).await {
+					Ok(_) => {
+						let _ = tx.send(ok_response(&id, json!({})));
+					}
+					Err(e) => {
+						let _ = tx.send(err_response(&id, e));
+					}
+				},
 				Err(e) => {
 					let _ = tx.send(err_response(&id, e));
 				}
@@ -225,7 +250,14 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		}
 		Command::Unsubscribe { id, address, service_uuid, char_uuid } => {
 			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
-				Ok((p, c)) => respond(&tx, &id, p.unsubscribe(&c).await.map(|_| json!({}))),
+				Ok((p, c)) => match retry_gatt("unsubscribe", || p.unsubscribe(&c)).await {
+					Ok(_) => {
+						let _ = tx.send(ok_response(&id, json!({})));
+					}
+					Err(e) => {
+						let _ = tx.send(err_response(&id, e));
+					}
+				},
 				Err(e) => {
 					let _ = tx.send(err_response(&id, e));
 				}
@@ -330,7 +362,8 @@ async fn find_characteristic(
 
 	let mut chars = p.characteristics();
 	if chars.is_empty() {
-		p.discover_services().await.map_err(|e| e.to_string())?;
+		let p2 = p.clone();
+		retry_gatt("discover_services", || p2.discover_services()).await?;
 		chars = p.characteristics();
 	}
 	chars
@@ -338,6 +371,37 @@ async fn find_characteristic(
 		.find(|c| c.uuid == cu && c.service_uuid == su)
 		.map(|c| (p, c))
 		.ok_or_else(|| format!("characteristic {} not found on service {}", char_uuid, service_uuid))
+}
+
+/// Windows/WinRT has a well-documented quirk where the *first* GATT operation right after a fresh
+/// pairing (discover_services, subscribe, ...) hangs indefinitely instead of erroring, because the
+/// OS is still resolving the bonded device's private address (IRK/RPA) in the background - see
+/// https://learn.microsoft.com/en-us/answers/questions/2280559. A single long wait never resolves
+/// it (confirmed against real hardware: 2 minutes on one attempt still hung); the actual fix is to
+/// bound each attempt and retry, since a fresh call after the background resolution completes
+/// succeeds immediately. Applied to every peripheral GATT operation, since any of them can be
+/// "first" depending on call order.
+async fn retry_gatt<T, F, Fut>(label: &str, mut op: F) -> Result<T, String>
+where
+	F: FnMut() -> Fut,
+	Fut: std::future::Future<Output = Result<T, btleplug::Error>>,
+{
+	const MAX_ATTEMPTS: u32 = 8;
+	const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
+	const RETRY_DELAY: Duration = Duration::from_millis(500);
+
+	let mut last_err = format!("{} retries exhausted", label);
+	for attempt in 1..=MAX_ATTEMPTS {
+		match tokio::time::timeout(ATTEMPT_TIMEOUT, op()).await {
+			Ok(Ok(v)) => return Ok(v),
+			Ok(Err(e)) => last_err = e.to_string(),
+			Err(_) => last_err = format!("{} attempt {}/{} timed out after {:?}", label, attempt, MAX_ATTEMPTS, ATTEMPT_TIMEOUT),
+		}
+		if attempt < MAX_ATTEMPTS {
+			tokio::time::sleep(RETRY_DELAY).await;
+		}
+	}
+	Err(last_err)
 }
 
 fn respond(tx: &UnboundedSender<Value>, id: &str, result: Result<Value, btleplug::Error>) {

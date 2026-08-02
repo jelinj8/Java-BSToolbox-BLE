@@ -18,7 +18,10 @@ import com.fasterxml.jackson.databind.JsonNode;
 public class BlePeripheral {
 
 	private static final long CONNECT_TIMEOUT_MS = 20000;
-	private static final long DEFAULT_TIMEOUT_MS = 15000;
+	// Subscribing to a characteristic that requires an authenticated/bonded link can involve
+	// Windows finishing security-upgrade negotiation first, especially right after a fresh pair -
+	// observed taking notably longer than plain GATT operations against real hardware.
+	private static final long DEFAULT_TIMEOUT_MS = 30000;
 
 	private final BleAdapter adapter;
 	private final String address;
