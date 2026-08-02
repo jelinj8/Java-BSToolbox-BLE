@@ -68,6 +68,12 @@ final class NativeBinaryLoader {
 			archKey = "x86_64";
 		} else if (arch.equals("aarch64") || arch.equals("arm64")) {
 			archKey = "aarch64";
+		} else if (arch.startsWith("arm")) {
+			// JVMs report this 32-bit-ARM value inconsistently ("arm", "armv7l", "arm32", ...);
+			// normalize to the one directory name the ble-bridge build produces (armv7-a hard-float,
+			// i.e. Raspberry Pi 2/3/4/5 running a 32-bit OS and similar SBCs - not the armv6
+			// original Pi 1 / Pi Zero, which isn't binary-compatible with this build).
+			archKey = "armv7";
 		} else {
 			archKey = arch;
 		}

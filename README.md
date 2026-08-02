@@ -53,14 +53,22 @@ try (BleAdapter adapter = new BleAdapter()) {
 
 ## Building the sidecar
 
+`.github/workflows/ble-bridge-build.yml` builds `ble-bridge` for every supported OS/arch
+(Windows, Linux x86_64/aarch64/armv7 - e.g. Raspberry Pi, macOS x86_64/aarch64) and uploads a
+`ble-bridge-native-resources` artifact laid out ready to drop into `src/main/resources/native/`.
+Run it via `workflow_dispatch` or a push touching `ble-bridge/**`.
+
+To build a single target locally instead:
+
 ```bash
 cd ble-bridge
 cargo build --release --target x86_64-pc-windows-msvc
 cargo build --release --target x86_64-unknown-linux-gnu
 ```
 
-Copy the resulting binaries into `src/main/resources/native/win-x86_64/ble-bridge.exe` and
-`src/main/resources/native/linux-x86_64/ble-bridge` before building the Java jar.
+Copy the resulting binary into `src/main/resources/native/<os>-<arch>/ble-bridge[.exe]` (e.g.
+`native/win-x86_64/ble-bridge.exe`, `native/linux-x86_64/ble-bridge`) before building the Java
+jar. `NativeBinaryLoader` resolves that path from the JVM's `os.name`/`os.arch` at runtime.
 
 ## Status
 

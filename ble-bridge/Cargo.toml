@@ -17,6 +17,13 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde"] }
 
+# Pinned to the same version btleplug's linux backend depends on, so Cargo resolves a single
+# copy of `dbus` and unifies features onto it: "vendored" builds libdbus from source instead of
+# requiring a target-arch libdbus-1-dev package, which is what makes cross-compiling to
+# aarch64/armv7 (see .github/workflows/ble-bridge-build.yml) work without a matching sysroot.
+[target.'cfg(target_os = "linux")'.dependencies]
+dbus = { version = "0.9.7", features = ["vendored"] }
+
 [profile.release]
 opt-level = "z"
 lto = true

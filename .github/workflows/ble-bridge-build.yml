@@ -1,0 +1,147 @@
+# Builds the ble-bridge Rust sidecar for every OS/arch this library supports, and stages the
+# results into the src/main/resources/native/<os>-<arch>/ layout NativeBinaryLoader expects.
+#
+# btleplug drives a different native BLE stack per OS (WinRT / BlueZ-DBus / CoreBluetooth), so
+# these binaries can't be produced by cross-compiling from a single host - each OS target is
+# built on a native GitHub-hosted runner for that OS. The two Linux ARM targets are the
+# exception: there's no hosted ARM Linux runner, so they're cross-compiled from ubuntu-latest via
+# `cross` (Docker-based); see ble-bridge/Cargo.toml for the dbus "vendored" feature that makes
+# that work without a target-arch libdbus-1-dev package.
+#
+# This workflow does not commit anything back to the repo - it uploads build artifacts. Download
+# the `ble-bridge-native-resources` artifact from a run and copy its contents into
+# src/main/resources/native/ before building the Java jar.
+
+name: Build ble-bridge sidecar
+
+on:
+  workflow_dispatch: {}
+  push:
+    branches: [main]
+    paths:
+      - "ble-bridge/**"
+      - ".github/workflows/ble-bridge-build.yml"
+  pull_request:
+    paths:
+      - "ble-bridge/**"
+      - ".github/workflows/ble-bridge-build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ble-bridge-build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: win-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            bin: ble-bridge.exe
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            bin: ble-bridge
+          - name: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            bin: ble-bridge
+            cross: true
+          - name: linux-armv7
+            os: ubuntu-latest
+            target: armv7-unknown-linux-gnueabihf
+            bin: ble-bridge
+            cross: true
+          - name: mac-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+            bin: ble-bridge
+          - name: mac-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            bin: ble-bridge
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: ble-bridge
+          key: ${{ matrix.target }}
+
+      # Only the natively-built Linux target links against the host's own libdbus; the two
+      # cross-compiled ARM targets get libdbus from the "vendored" Cargo feature instead.
+      - name: Install libdbus dev headers
+        if: matrix.name == 'linux-x86_64'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+
+      - name: Install cross
+        if: matrix.cross == true
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cross
+
+      - name: cargo build
+        if: matrix.cross != true
+        working-directory: ble-bridge
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: cross build
+        if: matrix.cross == true
+        working-directory: ble-bridge
+        run: cross build --release --target ${{ matrix.target }}
+
+      - name: Stage binary
+        shell: bash
+        run: |
+          mkdir -p staging
+          cp "ble-bridge/target/${{ matrix.target }}/release/${{ matrix.bin }}" "staging/${{ matrix.bin }}"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ble-bridge-${{ matrix.name }}
+          path: staging/${{ matrix.bin }}
+          if-no-files-found: error
+
+  stage-resources:
+    name: stage native/ resource tree
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Lay out src/main/resources/native/<os>-<arch>/
+        shell: bash
+        run: |
+          set -euo pipefail
+          declare -A DEST=(
+            [ble-bridge-win-x86_64]=native/win-x86_64
+            [ble-bridge-linux-x86_64]=native/linux-x86_64
+            [ble-bridge-linux-aarch64]=native/linux-aarch64
+            [ble-bridge-linux-armv7]=native/linux-armv7
+            [ble-bridge-mac-aarch64]=native/mac-aarch64
+            [ble-bridge-mac-x86_64]=native/mac-x86_64
+          )
+          for artifact in "${!DEST[@]}"; do
+            dir="${DEST[$artifact]}"
+            mkdir -p "$dir"
+            cp "artifacts/$artifact"/* "$dir/"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ble-bridge-native-resources
+          path: native/
