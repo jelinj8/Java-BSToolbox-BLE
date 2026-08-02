@@ -17,7 +17,7 @@ name: Build ble-bridge sidecar
 on:
   workflow_dispatch: {}
   push:
-    branches: [main]
+    branches: [master]
     paths:
       - "ble-bridge/**"
       - ".github/workflows/ble-bridge-build.yml"
