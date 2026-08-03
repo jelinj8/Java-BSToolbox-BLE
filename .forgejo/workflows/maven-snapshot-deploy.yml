@@ -1,8 +1,8 @@
 # Publishes a Maven library snapshot to Forgejo's own package registry on every push. Adapted
-# from SYS/devenv's samples/maven-snapshot-deploy.yml for this repo: default branch is `main`,
-# not `master`. pom.xml has an empty <distributionManagement></distributionManagement> (no
-# <repository> child) - harmless, deploys via -DaltDeploymentRepository regardless, same as the
-# rest of this family.
+# from SYS/devenv's samples/maven-snapshot-deploy.yml. This repo's default branch is `master`,
+# not `main` (unlike Meshcore, where this file's trigger was copied from). pom.xml has an empty
+# <distributionManagement></distributionManagement> (no <repository> child) - harmless, deploys
+# via -DaltDeploymentRepository regardless, same as the rest of this family.
 #
 # This file lives on GitHub (the real source of truth, which Forgejo pull-mirrors) rather than
 # being pushed directly to the Forgejo side - a commit made only on the Forgejo side of a pull
@@ -10,7 +10,7 @@
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   workflow_dispatch:
 
 jobs:
