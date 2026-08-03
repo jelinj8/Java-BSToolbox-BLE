@@ -373,21 +373,19 @@ async fn find_characteristic(
 		.ok_or_else(|| format!("characteristic {} not found on service {}", char_uuid, service_uuid))
 }
 
-/// Windows/WinRT has a well-documented quirk where the *first* GATT operation right after a fresh
-/// pairing (discover_services, subscribe, ...) hangs indefinitely instead of erroring, because the
-/// OS is still resolving the bonded device's private address (IRK/RPA) in the background - see
-/// https://learn.microsoft.com/en-us/answers/questions/2280559. A single long wait never resolves
-/// it (confirmed against real hardware: 2 minutes on one attempt still hung); the actual fix is to
-/// bound each attempt and retry, since a fresh call after the background resolution completes
-/// succeeds immediately. Applied to every peripheral GATT operation, since any of them can be
-/// "first" depending on call order.
+/// Windows/WinRT has a documented quirk where a GATT operation shortly after pairing can hang
+/// instead of erroring, because the OS is still resolving the bonded device's private address in
+/// the background (see https://learn.microsoft.com/en-us/answers/questions/2280559). Bounding
+/// each attempt and retrying gives that a chance to clear without hanging forever; it is not a
+/// complete fix for every case of Windows BLE flakiness. Applied to every peripheral GATT
+/// operation, since any of them can be "first" depending on call order.
 async fn retry_gatt<T, F, Fut>(label: &str, mut op: F) -> Result<T, String>
 where
 	F: FnMut() -> Fut,
 	Fut: std::future::Future<Output = Result<T, btleplug::Error>>,
 {
-	const MAX_ATTEMPTS: u32 = 8;
-	const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(3);
+	const MAX_ATTEMPTS: u32 = 4;
+	const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 	const RETRY_DELAY: Duration = Duration::from_millis(500);
 
 	let mut last_err = format!("{} retries exhausted", label);
