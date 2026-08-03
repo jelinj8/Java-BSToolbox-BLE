@@ -77,11 +77,9 @@ jar. `NativeBinaryLoader` resolves that path from the JVM's `os.name`/`os.arch` 
 
 ## Status
 
-Early scaffolding — built to re-enable BLE support in
-[`meshcore-companion`](https://github.com/jelinj8/MeshcoreJava)'s `BleMeshcoreCompanion`, and
-intended to also back a future Java port of Niimbot/Phomemo BLE label-printer control. The public
-API is deliberately generic GATT-level (scan/connect/discover/read/write/subscribe), not tied to
-either consumer.
+Early scaffolding. The public API is deliberately generic GATT-level
+(scan/connect/discover/read/write/subscribe) — no assumptions about any particular peripheral or
+protocol.
 
 ## License
 
