@@ -9,7 +9,11 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use btleplug::api::{Central, CentralEvent, CharPropFlags, Manager as _, Peripheral as _, ScanFilter, WriteType};
+use btleplug::api::{Central, CentralEvent, Manager as _, Peripheral as _, ScanFilter};
+// Only used by the non-Windows GATT path (see platform_* functions below) - Windows bypasses
+// btleplug's GATT layer entirely, see win_gatt.rs.
+#[cfg(not(target_os = "windows"))]
+use btleplug::api::{CharPropFlags, WriteType};
 use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::stream::StreamExt;
 use serde::Deserialize;
@@ -524,6 +528,7 @@ fn err_response(id: &str, message: String) -> Value {
 	json!({"type": "response", "id": id, "ok": false, "error": message})
 }
 
+#[cfg(not(target_os = "windows"))]
 fn char_props_to_strings(props: CharPropFlags) -> Vec<String> {
 	let mut v = Vec::new();
 	if props.contains(CharPropFlags::READ) {

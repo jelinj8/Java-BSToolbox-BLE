@@ -172,7 +172,9 @@ pub async fn discover_services(address: &str) -> Result<Vec<Value>, String> {
 	if status != GattCommunicationStatus::Success {
 		return Err(format!("GetGattServicesAsync failed: {:?}", status));
 	}
-	let services = services_result.Services().map_err(|e| e.to_string())?;
+	// Collect into an owned Vec before the loop below - IVectorView's iterator is not Send (see
+	// btleplug's own device.rs, which does the same for this exact reason), and the loop awaits.
+	let services: Vec<_> = services_result.Services().map_err(|e| e.to_string())?.into_iter().collect();
 
 	let mut result = Vec::new();
 	for service in services {
