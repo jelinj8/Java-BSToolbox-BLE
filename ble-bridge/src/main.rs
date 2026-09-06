@@ -152,8 +152,15 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		Command::Connect { id, address } => match get_peripheral(&state, &address).await {
 			Ok(p) => {
 				let p2 = p.clone();
-				match retry_gatt("connect", || p2.connect()).await {
+				match retry_gatt("connect", CONNECT_ATTEMPT_TIMEOUT, CONNECT_MAX_ATTEMPTS, || p2.connect()).await {
 					Ok(_) => {
+						// Windows/WinRT has been observed needing a few seconds after connect to
+						// finish resolving the bonded device's private address / establishing the
+						// GATT session in the background (see retry_gatt's doc comment) - a GATT
+						// operation issued immediately after connect can otherwise stall for the
+						// whole discover_services retry budget. This costs a couple of seconds on
+						// every connect, on every platform, to avoid that stall where it's been seen.
+						tokio::time::sleep(POST_CONNECT_SETTLE_DELAY).await;
 						let _ = tx.send(ok_response(&id, json!({})));
 					}
 					Err(e) => {
@@ -170,7 +177,10 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		Command::DiscoverServices { id, address } => match get_peripheral(&state, &address).await {
 			Ok(p) => {
 				let p2 = p.clone();
-				if let Err(e) = retry_gatt("discover_services", || p2.discover_services()).await {
+				if let Err(e) =
+					retry_gatt("discover_services", DISCOVER_ATTEMPT_TIMEOUT, DISCOVER_MAX_ATTEMPTS, || p2.discover_services())
+						.await
+				{
 					let _ = tx.send(err_response(&id, e));
 					return;
 				}
@@ -195,7 +205,7 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		},
 		Command::Read { id, address, service_uuid, char_uuid } => {
 			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
-				Ok((p, c)) => match retry_gatt("read", || p.read(&c)).await {
+				Ok((p, c)) => match retry_gatt("read", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.read(&c)).await {
 					Ok(bytes) => {
 						let _ = tx.send(ok_response(&id, json!({ "value_hex": hex_encode(&bytes) })));
 					}
@@ -219,7 +229,7 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
 				Ok((p, c)) => {
 					let wt = if with_response { WriteType::WithResponse } else { WriteType::WithoutResponse };
-					match retry_gatt("write", || p.write(&c, &bytes, wt)).await {
+					match retry_gatt("write", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.write(&c, &bytes, wt)).await {
 						Ok(_) => {
 							let _ = tx.send(ok_response(&id, json!({})));
 						}
@@ -235,7 +245,7 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		}
 		Command::Subscribe { id, address, service_uuid, char_uuid } => {
 			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
-				Ok((p, c)) => match retry_gatt("subscribe", || p.subscribe(&c)).await {
+				Ok((p, c)) => match retry_gatt("subscribe", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.subscribe(&c)).await {
 					Ok(_) => {
 						let _ = tx.send(ok_response(&id, json!({})));
 					}
@@ -250,7 +260,7 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		}
 		Command::Unsubscribe { id, address, service_uuid, char_uuid } => {
 			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
-				Ok((p, c)) => match retry_gatt("unsubscribe", || p.unsubscribe(&c)).await {
+				Ok((p, c)) => match retry_gatt("unsubscribe", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.unsubscribe(&c)).await {
 					Ok(_) => {
 						let _ = tx.send(ok_response(&id, json!({})));
 					}
@@ -363,7 +373,7 @@ async fn find_characteristic(
 	let mut chars = p.characteristics();
 	if chars.is_empty() {
 		let p2 = p.clone();
-		retry_gatt("discover_services", || p2.discover_services()).await?;
+		retry_gatt("discover_services", DISCOVER_ATTEMPT_TIMEOUT, DISCOVER_MAX_ATTEMPTS, || p2.discover_services()).await?;
 		chars = p.characteristics();
 	}
 	chars
@@ -373,29 +383,53 @@ async fn find_characteristic(
 		.ok_or_else(|| format!("characteristic {} not found on service {}", char_uuid, service_uuid))
 }
 
+// How long connect() itself is allowed to take per attempt, and how many attempts. Observed
+// taking ~1-1.5s on a live device even on Windows, so this stays tight.
+const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+const CONNECT_MAX_ATTEMPTS: u32 = 4;
+
+// discover_services has been observed on Windows/WinRT to time out repeatedly at the old 5s
+// budget (4 attempts, ~21.5s total) shortly after a fresh pairing, then still fail rather than
+// eventually succeed - i.e. the 5s cap was killing an in-flight attempt before Windows's
+// background work (see POST_CONNECT_SETTLE_DELAY below) had a chance to finish, rather than a
+// truly hung operation. A longer per-attempt budget gives it room to actually complete instead of
+// being restarted from scratch every 5s.
+const DISCOVER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
+const DISCOVER_MAX_ATTEMPTS: u32 = 3;
+
+// Ordinary GATT ops (read/write/subscribe/unsubscribe) on an already-discovered peripheral -
+// these have been observed completing quickly even on Windows, so kept at the original budget.
+const GATT_OP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
+const GATT_OP_MAX_ATTEMPTS: u32 = 4;
+
+const RETRY_DELAY: Duration = Duration::from_millis(500);
+
+// See retry_gatt's doc comment: gives Windows/WinRT a head start on whatever background work it
+// does right after connect, before the first GATT operation (typically discover_services) is
+// attempted.
+const POST_CONNECT_SETTLE_DELAY: Duration = Duration::from_secs(2);
+
 /// Windows/WinRT has a documented quirk where a GATT operation shortly after pairing can hang
 /// instead of erroring, because the OS is still resolving the bonded device's private address in
 /// the background (see https://learn.microsoft.com/en-us/answers/questions/2280559). Bounding
 /// each attempt and retrying gives that a chance to clear without hanging forever; it is not a
 /// complete fix for every case of Windows BLE flakiness. Applied to every peripheral GATT
-/// operation, since any of them can be "first" depending on call order.
-async fn retry_gatt<T, F, Fut>(label: &str, mut op: F) -> Result<T, String>
+/// operation, since any of them can be "first" depending on call order. Timeout/attempt budgets
+/// are per-operation (see the constants above) since discover_services has needed a much longer
+/// budget than the others in practice.
+async fn retry_gatt<T, F, Fut>(label: &str, attempt_timeout: Duration, max_attempts: u32, mut op: F) -> Result<T, String>
 where
 	F: FnMut() -> Fut,
 	Fut: std::future::Future<Output = Result<T, btleplug::Error>>,
 {
-	const MAX_ATTEMPTS: u32 = 4;
-	const ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
-	const RETRY_DELAY: Duration = Duration::from_millis(500);
-
 	let mut last_err = format!("{} retries exhausted", label);
-	for attempt in 1..=MAX_ATTEMPTS {
-		match tokio::time::timeout(ATTEMPT_TIMEOUT, op()).await {
+	for attempt in 1..=max_attempts {
+		match tokio::time::timeout(attempt_timeout, op()).await {
 			Ok(Ok(v)) => return Ok(v),
 			Ok(Err(e)) => last_err = e.to_string(),
-			Err(_) => last_err = format!("{} attempt {}/{} timed out after {:?}", label, attempt, MAX_ATTEMPTS, ATTEMPT_TIMEOUT),
+			Err(_) => last_err = format!("{} attempt {}/{} timed out after {:?}", label, attempt, max_attempts, attempt_timeout),
 		}
-		if attempt < MAX_ATTEMPTS {
+		if attempt < max_attempts {
 			tokio::time::sleep(RETRY_DELAY).await;
 		}
 	}

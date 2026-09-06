@@ -17,11 +17,16 @@ import com.fasterxml.jackson.databind.JsonNode;
  */
 public class BlePeripheral {
 
-	// Must exceed the sidecar's own retry budget for a single GATT op (ble-bridge's retry_gatt:
-	// currently ~21.5s worst case), or the Java side times out before the sidecar's own retries -
-	// which exist to ride out transient OS-level BLE delays - get a chance to finish.
-	private static final long CONNECT_TIMEOUT_MS = 25000;
-	private static final long DEFAULT_TIMEOUT_MS = 25000;
+	// Must exceed the sidecar's own retry budget for the corresponding op (ble-bridge's
+	// retry_gatt), or the Java side times out before the sidecar's own retries - which exist to
+	// ride out transient OS-level BLE delays - get a chance to finish. connect: ~21.5s retry
+	// budget + a 2s post-connect settle delay = ~23.5s worst case.
+	private static final long CONNECT_TIMEOUT_MS = 30000;
+	// subscribe/read/write/unsubscribe can each chain an implicit discover_services first (if
+	// characteristics aren't cached yet), whose own retry budget (~46s, widened for a Windows/
+	// WinRT quirk - see ble-bridge's DISCOVER_ATTEMPT_TIMEOUT) stacks with the op's own (~21.5s):
+	// ~67.5s worst case.
+	private static final long DEFAULT_TIMEOUT_MS = 75000;
 
 	private final BleAdapter adapter;
 	private final String address;
