@@ -22,22 +22,28 @@ this library can connect to it. Neither `btleplug` nor a from-scratch pairing im
 wired up here; `connect()` against an unpaired-but-bonding-required device will simply fail with a
 clear error.
 
-**Known issue on Windows:** `discover_services` has been observed hanging indefinitely on Windows
-shortly after connecting to a bonded device — every attempt at every timeout length tried so far
-(5s and 15s per attempt, several attempts) ends in a timeout, never a real error and never a
-success. That means it's a genuinely stuck WinRT call, not a slow-but-working one: widening
-`retry_gatt`'s budget in `ble-bridge/src/main.rs` (see its git history) does not help, since
-retrying the same call against the same connection just re-hits the same stuck state. A fix likely
-needs a full disconnect/reconnect (fresh WinRT session) on `discover_services` failure rather than
-retrying in place - not yet implemented. Confirmed *not* reproduced on Linux/BlueZ against real
-MeshCore hardware (connect + discover_services + subscribe + full protocol handshake all completed
-in well under a second, no retries) - if BLE is flaky, try Linux before assuming a bug here.
+**Windows GATT path bypasses btleplug entirely.** `discover_services`/read/write/subscribe/
+unsubscribe were observed hanging indefinitely on Windows shortly after connecting to a bonded
+device via btleplug's own Windows backend - a documented btleplug issue (#325): an abandoned
+uncached WinRT GATT operation isn't actually cancelled when the Rust future wrapping it is dropped,
+and appears to hold an internal lock that queues up every subsequent GATT operation behind it, on
+that same long-lived device object, no matter how wide a retry budget it's given. `win_gatt.rs`
+works around this on Windows by going straight to WinRT instead: a fresh `BluetoothLEDevice` per
+service (cached and shared across every characteristic on that service - two independent proxies
+for the same service open at once made Windows reject GATT access with `AccessDenied`, confirmed
+against real hardware) and a targeted `GetCharacteristicsForUuidAsync` per characteristic, rather
+than enumerating everything. Confirmed end-to-end against real MeshCore hardware: connect +
+subscribe + write + full protocol handshake all complete on the first attempt. `connect`/
+`disconnect`/scan are unaffected and still go through btleplug there, since they haven't shown this
+failure mode. Linux/BlueZ was already confirmed working via btleplug directly (full handshake in
+well under a second, no retries) and is unaffected by any of this.
 
 ## Modules
 
 - `ble-bridge/` — the Rust sidecar (`cargo build --release`). Prebuilt binaries for each
   supported OS/arch are bundled into the Java jar's resources at
-  `src/main/resources/native/<os>-<arch>/ble-bridge[.exe]`.
+  `src/main/resources/native/<os>-<arch>/ble-bridge[.exe]`. `src/win_gatt.rs` is the Windows-only
+  direct-WinRT GATT path described above (everything else goes through btleplug, in `main.rs`).
 - `src/main/java/cz/bliksoft/javautils/ble/` — the Java client library
   (`cz.bliksoft.java:common-java-utils-ble`).
 
