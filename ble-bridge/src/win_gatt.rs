@@ -73,12 +73,12 @@ fn service_key(address: &str, service_uuid: &str) -> String {
 /// One `GattSession` per address, kept alive (with `MaintainConnection` set) for the life of the
 /// process. Windows only negotiates the ATT MTU past the 23-byte default while a `GattSession` for
 /// the device is held open - without this, every GATT write here stays capped at ~20 usable bytes
-/// regardless of what the peripheral requests, which silently breaks any frame longer than that
-/// (MeshCore's own companion-radio protocol docs say the firmware expects the client to negotiate
-/// up to a 512-byte MTU; short fixed-size commands happen to fit under the default and so appear to
-/// work fine even without this). There's no direct "request MTU" call on Windows (unlike Android's
-/// `requestMtu()`/iOS's `maximumWriteValueLength`) - simply holding an active session is what makes
-/// Windows negotiate a larger `MaxPduSize` at all.
+/// regardless of what the peripheral requests, which silently breaks any write longer than that
+/// (plenty of GATT peripherals expect a larger MTU - e.g. up to 512 bytes - for anything beyond
+/// small fixed-size commands, which is exactly what continues to work fine even without this).
+/// There's no direct "request MTU" call on Windows (unlike Android's `requestMtu()`/iOS's
+/// `maximumWriteValueLength`) - simply holding an active session is what makes Windows negotiate a
+/// larger `MaxPduSize` at all.
 static SESSIONS: Mutex<Option<HashMap<String, GattSession>>> = Mutex::new(None);
 
 async fn ensure_session(address: &str) -> Result<(), String> {
