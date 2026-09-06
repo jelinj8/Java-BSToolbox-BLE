@@ -256,24 +256,29 @@ pub async fn subscribe(tx: &UnboundedSender<Value>, address: &str, service_uuid:
 	let addr = address.to_string();
 	let char_uuid_owned = char_uuid.to_string();
 	let tx = tx.clone();
-	let value_handler = TypedEventHandler::new(
-		move |_sender: Ref<GattCharacteristic>, args: Ref<GattValueChangedEventArgs>| {
-			if let Ok(args) = args.ok() {
-				if let Ok(value) = args.CharacteristicValue() {
-					if let Ok(data) = to_vec(&value) {
-						let _ = tx.send(json!({
-							"type": "notification",
-							"address": addr,
-							"char_uuid": char_uuid_owned,
-							"value_hex": hex_encode(&data),
-						}));
+	// TypedEventHandler isn't Send, so it must not still be in scope at the await below (see the
+	// DataWriter/IBuffer comment in write() for why this matters even though it's not used again)
+	// - drop it as soon as registration is done, same as btleplug's own subscribe().
+	let notify_token = {
+		let value_handler = TypedEventHandler::new(
+			move |_sender: Ref<GattCharacteristic>, args: Ref<GattValueChangedEventArgs>| {
+				if let Ok(args) = args.ok() {
+					if let Ok(value) = args.CharacteristicValue() {
+						if let Ok(data) = to_vec(&value) {
+							let _ = tx.send(json!({
+								"type": "notification",
+								"address": addr,
+								"char_uuid": char_uuid_owned,
+								"value_hex": hex_encode(&data),
+							}));
+						}
 					}
 				}
-			}
-			Ok(())
-		},
-	);
-	let notify_token = characteristic.ValueChanged(&value_handler).map_err(|e| e.to_string())?;
+				Ok(())
+			},
+		);
+		characteristic.ValueChanged(&value_handler).map_err(|e| e.to_string())?
+	};
 
 	let status = match characteristic.WriteClientCharacteristicConfigurationDescriptorAsync(config) {
 		Ok(op) => op.await,
