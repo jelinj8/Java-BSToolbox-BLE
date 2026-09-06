@@ -216,19 +216,25 @@ pub async fn read(address: &str, service_uuid: &str, char_uuid: &str) -> Result<
 
 pub async fn write(address: &str, service_uuid: &str, char_uuid: &str, bytes: &[u8], with_response: bool) -> Result<(), String> {
 	let (_device, _service, characteristic) = find_characteristic(address, service_uuid, char_uuid).await?;
-	let writer = DataWriter::new().map_err(|e| e.to_string())?;
-	writer.WriteBytes(bytes).map_err(|e| e.to_string())?;
-	let buffer = writer.DetachBuffer().map_err(|e| e.to_string())?;
 	let write_option = if with_response {
 		windows::Devices::Bluetooth::GenericAttributeProfile::GattWriteOption::WriteWithResponse
 	} else {
 		windows::Devices::Bluetooth::GenericAttributeProfile::GattWriteOption::WriteWithoutResponse
 	};
-	let status = characteristic
-		.WriteValueWithOptionAsync(&buffer, write_option)
-		.map_err(|e| e.to_string())?
-		.await
-		.map_err(|e| e.to_string())?;
+	// DataWriter/IBuffer aren't Send, and (having a Drop impl) stay part of this async fn's state
+	// until their scope ends even though neither is used again - not just until their last real
+	// use - so both must be dropped explicitly before the await below, not just left to fall out
+	// of scope at the end of the function.
+	let operation = {
+		let writer = DataWriter::new().map_err(|e| e.to_string())?;
+		writer.WriteBytes(bytes).map_err(|e| e.to_string())?;
+		let buffer = writer.DetachBuffer().map_err(|e| e.to_string())?;
+		let operation = characteristic.WriteValueWithOptionAsync(&buffer, write_option).map_err(|e| e.to_string())?;
+		drop(buffer);
+		drop(writer);
+		operation
+	};
+	let status = operation.await.map_err(|e| e.to_string())?;
 	if status != GattCommunicationStatus::Success {
 		return Err(format!("write failed: {:?}", status));
 	}
