@@ -15,19 +15,29 @@
 //!
 //! The documented workaround (see the discussion on that issue) is to never reuse a device object
 //! across GATT operations, and to query the specific service/characteristic needed by UUID rather
-//! than enumerating everything: each call below opens a *fresh* `BluetoothLEDevice` via
-//! `FromBluetoothAddressAsync` and queries via `GetGattServicesForUuidAsync` /
-//! `GetCharacteristicsForUuidAsync` with the default (not explicitly Uncached) cache mode. A fresh
-//! device object has no history of abandoned operations to queue behind. `FromBluetoothAddressAsync`
-//! is a lightweight proxy to the OS's single underlying connection for a device, not a new physical
-//! connection, so doing this on every call is cheap and doesn't disturb the connection btleplug
-//! established via `Central`/`Peripheral::connect()` (which is NOT bypassed - only GATT read/write/
-//! subscribe/discovery are; connect/disconnect/scan continue to use btleplug as before, since they
-//! have not shown this failure mode here).
+//! than enumerating everything: `resolve_service` below opens a `BluetoothLEDevice` via
+//! `FromBluetoothAddressAsync` and queries it via `GetGattServicesForUuidAsync` with the default
+//! (not explicitly Uncached) cache mode, then queries the specific characteristic needed via
+//! `GetCharacteristicsForUuidAsync` on that service. `FromBluetoothAddressAsync` is a lightweight
+//! proxy to the OS's single underlying connection for a device, not a new physical connection, so
+//! this doesn't disturb the connection btleplug established via `Central`/`Peripheral::connect()`
+//! (which is NOT bypassed - only GATT read/write/subscribe/discovery are; connect/disconnect/scan
+//! continue to use btleplug as before, since they haven't shown this failure mode here).
 //!
-//! A subscription's event handler and the WinRT objects it's registered on must stay alive for the
-//! life of the subscription (unlike a one-shot read/write, which can discard its device/service/
-//! characteristic handles immediately after use) - `SUBSCRIPTIONS` below keeps those alive.
+//! `resolve_service` caches the resolved `(BluetoothLEDevice, GattDeviceService)` pair per
+//! (address, service_uuid) in `SERVICES` and reuses it for every later characteristic on that same
+//! service, rather than opening an independent one per call: confirmed against real hardware that
+//! two independent `GattDeviceService` proxies for the *same* service, open at the same time (one
+//! held alive for a live subscription's notifications, a second freshly opened for a write to a
+//! different characteristic on that service), makes Windows reject GATT access on the second with
+//! `GattCommunicationStatus::AccessDenied` - a write succeeds fine on its own, and fails every time
+//! once something else is subscribed on the same service. Reusing one proxy per service avoids
+//! that entirely, while a fresh `GetCharacteristicsForUuidAsync` for the specific characteristic
+//! still runs per call, matching the workaround's spirit.
+//!
+//! A subscription's event handler and the characteristic it's registered on must stay alive for
+//! the life of the subscription (unlike a one-shot read/write) - `SUBSCRIPTIONS` below keeps that
+//! alive; the device/service it depends on are kept alive independently by `SERVICES`.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -47,12 +57,9 @@ use windows::core::{GUID, Ref};
 
 use crate::hex_encode;
 
-/// Keeps the WinRT objects backing a live subscription alive for as long as it's active, and
-/// holds the token needed to remove the `ValueChanged` handler on unsubscribe. Keyed by
-/// "address|service_uuid|char_uuid".
+/// Holds the characteristic a live subscription's `ValueChanged` handler is registered on, and the
+/// token needed to remove that handler on unsubscribe. Keyed by "address|service_uuid|char_uuid".
 struct WinSubscription {
-	_device: BluetoothLEDevice,
-	_service: GattDeviceService,
 	characteristic: GattCharacteristic,
 	notify_token: i64,
 }
@@ -61,6 +68,33 @@ static SUBSCRIPTIONS: Mutex<Option<HashMap<String, WinSubscription>>> = Mutex::n
 
 fn subscription_key(address: &str, service_uuid: &str, char_uuid: &str) -> String {
 	format!("{}|{}|{}", address, service_uuid, char_uuid)
+}
+
+/// One resolved `(BluetoothLEDevice, GattDeviceService)` pair per (address, service_uuid), kept
+/// alive for the life of the process - see the module doc comment for why sharing this across
+/// every characteristic on the service (rather than resolving an independent one per call) matters.
+static SERVICES: Mutex<Option<HashMap<String, (BluetoothLEDevice, GattDeviceService)>>> = Mutex::new(None);
+
+fn service_key(address: &str, service_uuid: &str) -> String {
+	format!("{}|{}", address, service_uuid)
+}
+
+async fn resolve_service(address: &str, service_uuid: &str) -> Result<(BluetoothLEDevice, GattDeviceService), String> {
+	let key = service_key(address, service_uuid);
+	{
+		let guard = SERVICES.lock().unwrap();
+		if let Some(found) = guard.as_ref().and_then(|m| m.get(&key)) {
+			return Ok(found.clone());
+		}
+		// guard drops here, before the awaits below - a std MutexGuard must not be held across one.
+	}
+	let device = open_device(address).await?;
+	let service = find_service(&device, service_uuid).await?;
+	let mut guard = SERVICES.lock().unwrap();
+	let map = guard.get_or_insert_with(HashMap::new);
+	// If another call resolved the same service concurrently in the meantime, keep that one and
+	// drop this redundant lookup rather than replacing an entry a live subscription may depend on.
+	Ok(map.entry(key).or_insert_with(|| (device, service)).clone())
 }
 
 fn to_guid(uuid: &Uuid) -> GUID {
@@ -151,18 +185,11 @@ async fn find_characteristic_on(service: &GattDeviceService, char_uuid: &str) ->
 		.ok_or_else(|| format!("characteristic {} not found on service", char_uuid))
 }
 
-/// Fresh device + targeted, UUID-scoped service/characteristic lookup - the core of the fix; see
-/// the module doc comment. Used for one-shot read/write, where discarding the device/service
-/// handles immediately after is fine (they're recreated fresh next call).
-async fn find_characteristic(
-	address: &str,
-	service_uuid: &str,
-	char_uuid: &str,
-) -> Result<(BluetoothLEDevice, GattDeviceService, GattCharacteristic), String> {
-	let device = open_device(address).await?;
-	let service = find_service(&device, service_uuid).await?;
-	let characteristic = find_characteristic_on(&service, char_uuid).await?;
-	Ok((device, service, characteristic))
+/// Resolves (and caches, see `resolve_service`) the service, then does a targeted, UUID-scoped
+/// characteristic lookup on it - the core of the fix; see the module doc comment.
+async fn find_characteristic(address: &str, service_uuid: &str, char_uuid: &str) -> Result<GattCharacteristic, String> {
+	let (_device, service) = resolve_service(address, service_uuid).await?;
+	find_characteristic_on(&service, char_uuid).await
 }
 
 pub async fn discover_services(address: &str) -> Result<Vec<Value>, String> {
@@ -205,7 +232,7 @@ pub async fn discover_services(address: &str) -> Result<Vec<Value>, String> {
 }
 
 pub async fn read(address: &str, service_uuid: &str, char_uuid: &str) -> Result<Vec<u8>, String> {
-	let (_device, _service, characteristic) = find_characteristic(address, service_uuid, char_uuid).await?;
+	let characteristic = find_characteristic(address, service_uuid, char_uuid).await?;
 	let result = characteristic.ReadValueAsync().map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())?;
 	let status = result.Status().map_err(|e| e.to_string())?;
 	if status != GattCommunicationStatus::Success {
@@ -215,7 +242,7 @@ pub async fn read(address: &str, service_uuid: &str, char_uuid: &str) -> Result<
 }
 
 pub async fn write(address: &str, service_uuid: &str, char_uuid: &str, bytes: &[u8], with_response: bool) -> Result<(), String> {
-	let (_device, _service, characteristic) = find_characteristic(address, service_uuid, char_uuid).await?;
+	let characteristic = find_characteristic(address, service_uuid, char_uuid).await?;
 	let write_option = if with_response {
 		windows::Devices::Bluetooth::GenericAttributeProfile::GattWriteOption::WriteWithResponse
 	} else {
@@ -242,7 +269,7 @@ pub async fn write(address: &str, service_uuid: &str, char_uuid: &str, bytes: &[
 }
 
 pub async fn subscribe(tx: &UnboundedSender<Value>, address: &str, service_uuid: &str, char_uuid: &str) -> Result<(), String> {
-	let (device, service, characteristic) = find_characteristic(address, service_uuid, char_uuid).await?;
+	let characteristic = find_characteristic(address, service_uuid, char_uuid).await?;
 
 	let props = characteristic.CharacteristicProperties().map_err(|e| e.to_string())?;
 	let config = if props & GattCharacteristicProperties::Indicate == GattCharacteristicProperties::Indicate {
@@ -304,7 +331,7 @@ pub async fn subscribe(tx: &UnboundedSender<Value>, address: &str, service_uuid:
 	let map = guard.get_or_insert_with(HashMap::new);
 	// Replacing an existing subscription (re-subscribe): drop the old one so its handler is
 	// removed, matching a WinSubscription's Drop.
-	map.insert(key, WinSubscription { _device: device, _service: service, characteristic, notify_token });
+	map.insert(key, WinSubscription { characteristic, notify_token });
 	Ok(())
 }
 
