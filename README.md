@@ -22,10 +22,16 @@ this library can connect to it. Neither `btleplug` nor a from-scratch pairing im
 wired up here; `connect()` against an unpaired-but-bonding-required device will simply fail with a
 clear error.
 
-**Known issue on Windows:** BLE pairing and GATT operations (`discover_services`, `subscribe`,
-etc) have been observed hanging on Windows after pairing a device, in ways `retry_gatt` in
-`ble-bridge/src/main.rs` only partially works around. Not reproduced on Linux/BlueZ so far — if
-BLE is flaky, try Linux before assuming a bug here.
+**Known issue on Windows:** `discover_services` has been observed hanging indefinitely on Windows
+shortly after connecting to a bonded device — every attempt at every timeout length tried so far
+(5s and 15s per attempt, several attempts) ends in a timeout, never a real error and never a
+success. That means it's a genuinely stuck WinRT call, not a slow-but-working one: widening
+`retry_gatt`'s budget in `ble-bridge/src/main.rs` (see its git history) does not help, since
+retrying the same call against the same connection just re-hits the same stuck state. A fix likely
+needs a full disconnect/reconnect (fresh WinRT session) on `discover_services` failure rather than
+retrying in place - not yet implemented. Confirmed *not* reproduced on Linux/BlueZ against real
+MeshCore hardware (connect + discover_services + subscribe + full protocol handshake all completed
+in well under a second, no retries) - if BLE is flaky, try Linux before assuming a bug here.
 
 ## Modules
 
