@@ -24,6 +24,18 @@ uuid = { version = "1", features = ["serde"] }
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = { version = "0.9.7", features = ["vendored"] }
 
+# Pinned to the same version btleplug's Windows backend depends on. Used to bypass btleplug's own
+# GATT layer on Windows (see src/win_gatt.rs for why) - only the scan/connect/disconnect/central-
+# event path still goes through btleplug there.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows = { version = "0.62", features = [
+	"Devices_Bluetooth",
+	"Devices_Bluetooth_GenericAttributeProfile",
+	"Foundation",
+	"Foundation_Collections",
+	"Storage_Streams",
+] }
+
 [profile.release]
 opt-level = "z"
 lto = true

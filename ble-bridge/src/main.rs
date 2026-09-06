@@ -18,6 +18,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use uuid::Uuid;
 
+#[cfg(target_os = "windows")]
+mod win_gatt;
+
 #[derive(Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 enum Command {
@@ -174,29 +177,8 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 			Ok(p) => respond(&tx, &id, p.disconnect().await.map(|_| json!({}))),
 			Err(e) => tx.send(err_response(&id, e)).ok().unwrap_or(()),
 		},
-		Command::DiscoverServices { id, address } => match get_peripheral(&state, &address).await {
-			Ok(p) => {
-				let p2 = p.clone();
-				if let Err(e) =
-					retry_gatt("discover_services", DISCOVER_ATTEMPT_TIMEOUT, DISCOVER_MAX_ATTEMPTS, || p2.discover_services())
-						.await
-				{
-					let _ = tx.send(err_response(&id, e));
-					return;
-				}
-				let services: Vec<Value> = p
-					.services()
-					.into_iter()
-					.map(|s| {
-						json!({
-							"uuid": s.uuid.to_string(),
-							"characteristics": s.characteristics.iter().map(|c| json!({
-								"uuid": c.uuid.to_string(),
-								"properties": char_props_to_strings(c.properties),
-							})).collect::<Vec<_>>(),
-						})
-					})
-					.collect();
+		Command::DiscoverServices { id, address } => match platform_discover_services(&state, &address).await {
+			Ok(services) => {
 				let _ = tx.send(ok_response(&id, json!({ "services": services })));
 			}
 			Err(e) => {
@@ -204,15 +186,10 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 			}
 		},
 		Command::Read { id, address, service_uuid, char_uuid } => {
-			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
-				Ok((p, c)) => match retry_gatt("read", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.read(&c)).await {
-					Ok(bytes) => {
-						let _ = tx.send(ok_response(&id, json!({ "value_hex": hex_encode(&bytes) })));
-					}
-					Err(e) => {
-						let _ = tx.send(err_response(&id, e));
-					}
-				},
+			match platform_read(&state, &address, &service_uuid, &char_uuid).await {
+				Ok(bytes) => {
+					let _ = tx.send(ok_response(&id, json!({ "value_hex": hex_encode(&bytes) })));
+				}
 				Err(e) => {
 					let _ = tx.send(err_response(&id, e));
 				}
@@ -226,17 +203,9 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 					return;
 				}
 			};
-			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
-				Ok((p, c)) => {
-					let wt = if with_response { WriteType::WithResponse } else { WriteType::WithoutResponse };
-					match retry_gatt("write", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.write(&c, &bytes, wt)).await {
-						Ok(_) => {
-							let _ = tx.send(ok_response(&id, json!({})));
-						}
-						Err(e) => {
-							let _ = tx.send(err_response(&id, e));
-						}
-					}
+			match platform_write(&state, &address, &service_uuid, &char_uuid, &bytes, with_response).await {
+				Ok(_) => {
+					let _ = tx.send(ok_response(&id, json!({})));
 				}
 				Err(e) => {
 					let _ = tx.send(err_response(&id, e));
@@ -244,30 +213,20 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 			}
 		}
 		Command::Subscribe { id, address, service_uuid, char_uuid } => {
-			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
-				Ok((p, c)) => match retry_gatt("subscribe", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.subscribe(&c)).await {
-					Ok(_) => {
-						let _ = tx.send(ok_response(&id, json!({})));
-					}
-					Err(e) => {
-						let _ = tx.send(err_response(&id, e));
-					}
-				},
+			match platform_subscribe(&state, &tx, &address, &service_uuid, &char_uuid).await {
+				Ok(_) => {
+					let _ = tx.send(ok_response(&id, json!({})));
+				}
 				Err(e) => {
 					let _ = tx.send(err_response(&id, e));
 				}
 			}
 		}
 		Command::Unsubscribe { id, address, service_uuid, char_uuid } => {
-			match find_characteristic(&state, &address, &service_uuid, &char_uuid).await {
-				Ok((p, c)) => match retry_gatt("unsubscribe", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.unsubscribe(&c)).await {
-					Ok(_) => {
-						let _ = tx.send(ok_response(&id, json!({})));
-					}
-					Err(e) => {
-						let _ = tx.send(err_response(&id, e));
-					}
-				},
+			match platform_unsubscribe(&state, &address, &service_uuid, &char_uuid).await {
+				Ok(_) => {
+					let _ = tx.send(ok_response(&id, json!({})));
+				}
 				Err(e) => {
 					let _ = tx.send(err_response(&id, e));
 				}
@@ -381,6 +340,111 @@ async fn find_characteristic(
 		.find(|c| c.uuid == cu && c.service_uuid == su)
 		.map(|c| (p, c))
 		.ok_or_else(|| format!("characteristic {} not found on service {}", char_uuid, service_uuid))
+}
+
+// ─── Platform dispatch ───────────────────────────────────────────────────────
+//
+// On Windows, GATT reads/writes/subscribes/discovery bypass btleplug entirely and go straight to
+// WinRT (see win_gatt.rs for why: btleplug's Windows backend queues every GATT op behind whatever
+// abandoned/stuck operation came before it on the same long-lived device object, so no retry
+// budget - however large - ever recovers once one op gets stuck). Every other platform keeps using
+// btleplug exactly as before, unchanged.
+
+#[cfg(target_os = "windows")]
+async fn platform_discover_services(_state: &AppState, address: &str) -> Result<Vec<Value>, String> {
+	win_gatt::discover_services(address).await
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn platform_discover_services(state: &AppState, address: &str) -> Result<Vec<Value>, String> {
+	let p = get_peripheral(state, address).await?;
+	let p2 = p.clone();
+	retry_gatt("discover_services", DISCOVER_ATTEMPT_TIMEOUT, DISCOVER_MAX_ATTEMPTS, || p2.discover_services()).await?;
+	Ok(p.services()
+		.into_iter()
+		.map(|s| {
+			json!({
+				"uuid": s.uuid.to_string(),
+				"characteristics": s.characteristics.iter().map(|c| json!({
+					"uuid": c.uuid.to_string(),
+					"properties": char_props_to_strings(c.properties),
+				})).collect::<Vec<_>>(),
+			})
+		})
+		.collect())
+}
+
+#[cfg(target_os = "windows")]
+async fn platform_read(_state: &AppState, address: &str, service_uuid: &str, char_uuid: &str) -> Result<Vec<u8>, String> {
+	win_gatt::read(address, service_uuid, char_uuid).await
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn platform_read(state: &AppState, address: &str, service_uuid: &str, char_uuid: &str) -> Result<Vec<u8>, String> {
+	let (p, c) = find_characteristic(state, address, service_uuid, char_uuid).await?;
+	retry_gatt("read", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.read(&c)).await
+}
+
+#[cfg(target_os = "windows")]
+async fn platform_write(
+	_state: &AppState,
+	address: &str,
+	service_uuid: &str,
+	char_uuid: &str,
+	bytes: &[u8],
+	with_response: bool,
+) -> Result<(), String> {
+	win_gatt::write(address, service_uuid, char_uuid, bytes, with_response).await
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn platform_write(
+	state: &AppState,
+	address: &str,
+	service_uuid: &str,
+	char_uuid: &str,
+	bytes: &[u8],
+	with_response: bool,
+) -> Result<(), String> {
+	let (p, c) = find_characteristic(state, address, service_uuid, char_uuid).await?;
+	let wt = if with_response { WriteType::WithResponse } else { WriteType::WithoutResponse };
+	retry_gatt("write", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.write(&c, bytes, wt)).await
+}
+
+#[cfg(target_os = "windows")]
+async fn platform_subscribe(
+	_state: &AppState,
+	tx: &UnboundedSender<Value>,
+	address: &str,
+	service_uuid: &str,
+	char_uuid: &str,
+) -> Result<(), String> {
+	win_gatt::subscribe(tx, address, service_uuid, char_uuid).await
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn platform_subscribe(
+	state: &AppState,
+	_tx: &UnboundedSender<Value>,
+	address: &str,
+	service_uuid: &str,
+	char_uuid: &str,
+) -> Result<(), String> {
+	// Notifications are forwarded via the shared per-peripheral stream set up in
+	// spawn_notification_forwarder / handle_central_event - not through tx directly here.
+	let (p, c) = find_characteristic(state, address, service_uuid, char_uuid).await?;
+	retry_gatt("subscribe", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.subscribe(&c)).await
+}
+
+#[cfg(target_os = "windows")]
+async fn platform_unsubscribe(_state: &AppState, address: &str, service_uuid: &str, char_uuid: &str) -> Result<(), String> {
+	win_gatt::unsubscribe(address, service_uuid, char_uuid).await
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn platform_unsubscribe(state: &AppState, address: &str, service_uuid: &str, char_uuid: &str) -> Result<(), String> {
+	let (p, c) = find_characteristic(state, address, service_uuid, char_uuid).await?;
+	retry_gatt("unsubscribe", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.unsubscribe(&c)).await
 }
 
 // How long connect() itself is allowed to take per attempt, and how many attempts. Observed
