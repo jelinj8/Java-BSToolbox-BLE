@@ -37,10 +37,10 @@ use std::sync::Mutex;
 use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
-use windows::Devices::Bluetooth::BluetoothLEDevice;
+use windows::Devices::Bluetooth::{BluetoothDeviceId, BluetoothLEDevice};
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
 	GattCharacteristic, GattCharacteristicProperties, GattClientCharacteristicConfigurationDescriptorValue,
-	GattCommunicationStatus, GattDeviceService, GattValueChangedEventArgs,
+	GattCommunicationStatus, GattDeviceService, GattSession, GattValueChangedEventArgs,
 };
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
@@ -70,7 +70,38 @@ fn service_key(address: &str, service_uuid: &str) -> String {
 	format!("{}|{}", address, service_uuid)
 }
 
+/// One `GattSession` per address, kept alive (with `MaintainConnection` set) for the life of the
+/// process. Windows only negotiates the ATT MTU past the 23-byte default while a `GattSession` for
+/// the device is held open - without this, every GATT write here stays capped at ~20 usable bytes
+/// regardless of what the peripheral requests, which silently breaks any frame longer than that
+/// (MeshCore's own companion-radio protocol docs say the firmware expects the client to negotiate
+/// up to a 512-byte MTU; short fixed-size commands happen to fit under the default and so appear to
+/// work fine even without this). There's no direct "request MTU" call on Windows (unlike Android's
+/// `requestMtu()`/iOS's `maximumWriteValueLength`) - simply holding an active session is what makes
+/// Windows negotiate a larger `MaxPduSize` at all.
+static SESSIONS: Mutex<Option<HashMap<String, GattSession>>> = Mutex::new(None);
+
+async fn ensure_session(address: &str) -> Result<(), String> {
+	{
+		let guard = SESSIONS.lock().unwrap();
+		if guard.as_ref().map_or(false, |m| m.contains_key(address)) {
+			return Ok(());
+		}
+	}
+	let device = open_device(address).await?;
+	let device_id = device.BluetoothDeviceId().map_err(|e| e.to_string())?;
+	let session = GattSession::FromDeviceIdAsync(&device_id)
+		.map_err(|e| e.to_string())?
+		.await
+		.map_err(|e| format!("GattSession::FromDeviceIdAsync failed for {}: {}", address, e))?;
+	session.SetMaintainConnection(true).map_err(|e| e.to_string())?;
+	let mut guard = SESSIONS.lock().unwrap();
+	guard.get_or_insert_with(HashMap::new).entry(address.to_string()).or_insert(session);
+	Ok(())
+}
+
 async fn resolve_service(address: &str, service_uuid: &str) -> Result<(BluetoothLEDevice, GattDeviceService), String> {
+	ensure_session(address).await?;
 	let key = service_key(address, service_uuid);
 	{
 		let guard = SERVICES.lock().unwrap();
