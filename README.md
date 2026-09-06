@@ -22,28 +22,29 @@ this library can connect to it. Neither `btleplug` nor a from-scratch pairing im
 wired up here; `connect()` against an unpaired-but-bonding-required device will simply fail with a
 clear error.
 
-**Windows GATT path bypasses btleplug entirely.** `discover_services`/read/write/subscribe/
-unsubscribe were observed hanging indefinitely on Windows shortly after connecting to a bonded
-device via btleplug's own Windows backend - a documented btleplug issue (#325): an abandoned
-uncached WinRT GATT operation isn't actually cancelled when the Rust future wrapping it is dropped,
-and appears to hold an internal lock that queues up every subsequent GATT operation behind it, on
-that same long-lived device object, no matter how wide a retry budget it's given. `win_gatt.rs`
-works around this on Windows by going straight to WinRT instead: a fresh `BluetoothLEDevice` per
-service (cached and shared across every characteristic on that service - two independent proxies
-for the same service open at once made Windows reject GATT access with `AccessDenied`, confirmed
-against real hardware) and a targeted `GetCharacteristicsForUuidAsync` per characteristic, rather
-than enumerating everything. Confirmed end-to-end against real MeshCore hardware: connect +
-subscribe + write + full protocol handshake all complete on the first attempt. `connect`/
-`disconnect`/scan are unaffected and still go through btleplug there, since they haven't shown this
-failure mode. Linux/BlueZ was already confirmed working via btleplug directly (full handshake in
-well under a second, no retries) and is unaffected by any of this.
+## Platform backends
+
+On Linux and macOS, every operation (scan/connect/disconnect/discover/read/write/subscribe) goes
+through `btleplug` directly.
+
+On Windows, only scan/connect/disconnect go through `btleplug`; discover/read/write/subscribe/
+unsubscribe are implemented directly against WinRT in `ble-bridge/src/win_gatt.rs`, bypassing
+`btleplug`'s Windows GATT layer entirely. Reason: that layer can leave an abandoned WinRT operation
+in a state that blocks every later GATT call on the same device object, with no way out via
+retries or timeouts (see [btleplug#325](https://github.com/deviceplug/btleplug/issues/325)).
+`win_gatt.rs` avoids this by resolving each service via a dedicated `BluetoothLEDevice` /
+`GattDeviceService` pair — cached and reused for every characteristic on that service, since two
+independent handles to the same service open at once make Windows reject GATT access outright —
+and looking up each characteristic by UUID on demand rather than enumerating the whole GATT
+profile. Read `win_gatt.rs`'s module doc comment for the full reasoning before touching that file.
 
 ## Modules
 
 - `ble-bridge/` — the Rust sidecar (`cargo build --release`). Prebuilt binaries for each
   supported OS/arch are bundled into the Java jar's resources at
-  `src/main/resources/native/<os>-<arch>/ble-bridge[.exe]`. `src/win_gatt.rs` is the Windows-only
-  direct-WinRT GATT path described above (everything else goes through btleplug, in `main.rs`).
+  `src/main/resources/native/<os>-<arch>/ble-bridge[.exe]`. `src/main.rs` holds the wire protocol
+  and the `btleplug`-backed implementation used on every platform; `src/win_gatt.rs` is the
+  Windows-only direct-WinRT path described above.
 - `src/main/java/cz/bliksoft/javautils/ble/` — the Java client library
   (`cz.bliksoft.java:common-java-utils-ble`).
 
@@ -89,9 +90,13 @@ jar. `NativeBinaryLoader` resolves that path from the JVM's `os.name`/`os.arch` 
 
 ## Status
 
-Early scaffolding. The public API is deliberately generic GATT-level
-(scan/connect/discover/read/write/subscribe) — no assumptions about any particular peripheral or
-protocol.
+Verified end-to-end on Windows and Linux against a real peripheral (a Nordic UART Service-based
+device): scan, connect, discover, subscribe, read and write all work, including reconnect after a
+manual disconnect. macOS has no automated or manual verification yet — the sidecar builds for it,
+but nothing has exercised it against real hardware.
+
+The public API is deliberately generic GATT-level (scan/connect/discover/read/write/subscribe) —
+no assumptions about any particular peripheral or protocol.
 
 ## License
 

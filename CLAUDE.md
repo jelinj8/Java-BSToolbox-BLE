@@ -13,7 +13,12 @@ the full rationale (including why SimpleBLE's BUSL-1.1 license was avoided) and 
 explicit out-of-scope status.
 
 Two modules:
-- `ble-bridge/` — the Rust sidecar (Cargo project, `cargo build --release`).
+- `ble-bridge/` — the Rust sidecar (Cargo project, `cargo build --release`). `main.rs` holds the
+  wire protocol and the `btleplug`-backed implementation used on every platform; `win_gatt.rs` is a
+  Windows-only direct-WinRT GATT path (discover/read/write/subscribe/unsubscribe only — connect/
+  disconnect/scan stay on btleplug there too) that works around a btleplug bug where an abandoned
+  WinRT operation can permanently block every later GATT call on the same device object. See
+  `win_gatt.rs`'s module doc comment and README.md before touching either GATT path.
 - `src/main/java/cz/bliksoft/javautils/ble/` — the Java client library.
 
 ## Build / test commands

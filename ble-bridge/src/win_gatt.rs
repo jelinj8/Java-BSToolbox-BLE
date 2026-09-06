@@ -1,43 +1,34 @@
-//! Windows-only direct WinRT GATT path, bypassing btleplug's Windows backend entirely for
-//! discover/read/write/subscribe/unsubscribe.
+//! Windows-only direct WinRT GATT path. discover/read/write/subscribe/unsubscribe go through this
+//! module instead of btleplug's Windows backend; connect/disconnect/scan still use btleplug (see
+//! `main.rs`) since they don't hit the problem described below.
 //!
-//! btleplug's Windows backend (see its `winrtble::ble::device::BLEDevice::get_characteristics`)
-//! already works around a documented WinRT quirk where an *uncached* GATT request can hang
-//! indefinitely, by racing it against a 5s timeout and falling back to a cached-mode request. That
-//! workaround has a known failure mode (btleplug issue #325, confirmed against real MeshCore
-//! hardware here too): the abandoned uncached WinRT operation isn't actually cancelled when the
-//! Rust future wrapping it is dropped, and appears to hold an internal lock that queues up every
-//! *subsequent* GATT operation behind it - so every later op, on the same long-lived device
-//! object, queues behind the same stuck operation and also "times out", no matter how long a
-//! budget it's given or how many times it's retried. Wider timeouts and retries were tried against
-//! real hardware here and made no difference, confirming this rather than a plain slow-device
-//! theory.
+//! ## Why this exists
 //!
-//! The documented workaround (see the discussion on that issue) is to never reuse a device object
-//! across GATT operations, and to query the specific service/characteristic needed by UUID rather
-//! than enumerating everything: `resolve_service` below opens a `BluetoothLEDevice` via
-//! `FromBluetoothAddressAsync` and queries it via `GetGattServicesForUuidAsync` with the default
-//! (not explicitly Uncached) cache mode, then queries the specific characteristic needed via
-//! `GetCharacteristicsForUuidAsync` on that service. `FromBluetoothAddressAsync` is a lightweight
-//! proxy to the OS's single underlying connection for a device, not a new physical connection, so
-//! this doesn't disturb the connection btleplug established via `Central`/`Peripheral::connect()`
-//! (which is NOT bypassed - only GATT read/write/subscribe/discovery are; connect/disconnect/scan
-//! continue to use btleplug as before, since they haven't shown this failure mode here).
+//! btleplug's Windows backend can leave an abandoned WinRT GATT operation holding an internal lock
+//! that every later GATT call on the same device object then queues behind - permanently, since
+//! the operation was never actually cancelled when the Rust future wrapping it was dropped. No
+//! retry budget recovers from this once it happens (see
+//! [btleplug#325](https://github.com/deviceplug/btleplug/issues/325)).
+//!
+//! The fix is to never reuse a device object across GATT operations, and to query the specific
+//! service/characteristic needed by UUID rather than enumerating everything. `resolve_service`
+//! opens a `BluetoothLEDevice` via `FromBluetoothAddressAsync` and queries it via
+//! `GetGattServicesForUuidAsync`, then `find_characteristic` queries the specific characteristic
+//! needed via `GetCharacteristicsForUuidAsync` on that service. `FromBluetoothAddressAsync` is a
+//! lightweight proxy to the OS's single underlying connection for a device, not a new physical
+//! connection, so this doesn't disturb the connection btleplug already established via
+//! `Peripheral::connect()`.
 //!
 //! `resolve_service` caches the resolved `(BluetoothLEDevice, GattDeviceService)` pair per
-//! (address, service_uuid) in `SERVICES` and reuses it for every later characteristic on that same
-//! service, rather than opening an independent one per call: confirmed against real hardware that
-//! two independent `GattDeviceService` proxies for the *same* service, open at the same time (one
-//! held alive for a live subscription's notifications, a second freshly opened for a write to a
-//! different characteristic on that service), makes Windows reject GATT access on the second with
-//! `GattCommunicationStatus::AccessDenied` - a write succeeds fine on its own, and fails every time
-//! once something else is subscribed on the same service. Reusing one proxy per service avoids
-//! that entirely, while a fresh `GetCharacteristicsForUuidAsync` for the specific characteristic
-//! still runs per call, matching the workaround's spirit.
+//! (address, service_uuid) in `SERVICES` and reuses it for every characteristic on that service,
+//! rather than opening an independent pair per call: two independent `GattDeviceService` proxies
+//! for the same service, open at the same time, make Windows reject GATT access on the second one
+//! with `GattCommunicationStatus::AccessDenied`. A fresh `GetCharacteristicsForUuidAsync` for the
+//! specific characteristic still runs on every call.
 //!
 //! A subscription's event handler and the characteristic it's registered on must stay alive for
-//! the life of the subscription (unlike a one-shot read/write) - `SUBSCRIPTIONS` below keeps that
-//! alive; the device/service it depends on are kept alive independently by `SERVICES`.
+//! the life of the subscription (unlike a one-shot read/write) - `SUBSCRIPTIONS` keeps that alive;
+//! the device/service it depends on are kept alive independently by `SERVICES`.
 
 use std::collections::HashMap;
 use std::str::FromStr;

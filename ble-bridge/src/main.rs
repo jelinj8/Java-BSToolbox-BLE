@@ -451,40 +451,29 @@ async fn platform_unsubscribe(state: &AppState, address: &str, service_uuid: &st
 	retry_gatt("unsubscribe", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.unsubscribe(&c)).await
 }
 
-// How long connect() itself is allowed to take per attempt, and how many attempts. Observed
-// taking ~1-1.5s on a live device even on Windows, so this stays tight.
+// connect() is shared across all platforms (see win_gatt.rs for why Windows bypasses btleplug for
+// everything past connect, but not connect itself). Windows/WinRT can take a few seconds after
+// connect to finish resolving the bonded device's private address in the background
+// (https://learn.microsoft.com/en-us/answers/questions/2280559) - POST_CONNECT_SETTLE_DELAY below
+// gives that a head start before the caller's first GATT operation.
 const CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const CONNECT_MAX_ATTEMPTS: u32 = 4;
 
-// discover_services has been observed on Windows/WinRT to time out repeatedly at the old 5s
-// budget (4 attempts, ~21.5s total) shortly after a fresh pairing, then still fail rather than
-// eventually succeed - i.e. the 5s cap was killing an in-flight attempt before Windows's
-// background work (see POST_CONNECT_SETTLE_DELAY below) had a chance to finish, rather than a
-// truly hung operation. A longer per-attempt budget gives it room to actually complete instead of
-// being restarted from scratch every 5s.
+// discover_services/read/write/subscribe/unsubscribe below (via retry_gatt) are the Linux/macOS
+// path only - see win_gatt.rs for the separate, non-retrying Windows implementation.
 const DISCOVER_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
 const DISCOVER_MAX_ATTEMPTS: u32 = 3;
 
-// Ordinary GATT ops (read/write/subscribe/unsubscribe) on an already-discovered peripheral -
-// these have been observed completing quickly even on Windows, so kept at the original budget.
 const GATT_OP_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(5);
 const GATT_OP_MAX_ATTEMPTS: u32 = 4;
 
 const RETRY_DELAY: Duration = Duration::from_millis(500);
 
-// See retry_gatt's doc comment: gives Windows/WinRT a head start on whatever background work it
-// does right after connect, before the first GATT operation (typically discover_services) is
-// attempted.
 const POST_CONNECT_SETTLE_DELAY: Duration = Duration::from_secs(2);
 
-/// Windows/WinRT has a documented quirk where a GATT operation shortly after pairing can hang
-/// instead of erroring, because the OS is still resolving the bonded device's private address in
-/// the background (see https://learn.microsoft.com/en-us/answers/questions/2280559). Bounding
-/// each attempt and retrying gives that a chance to clear without hanging forever; it is not a
-/// complete fix for every case of Windows BLE flakiness. Applied to every peripheral GATT
-/// operation, since any of them can be "first" depending on call order. Timeout/attempt budgets
-/// are per-operation (see the constants above) since discover_services has needed a much longer
-/// budget than the others in practice.
+/// Retries a btleplug GATT operation, bounding each attempt so a hung one doesn't block forever.
+/// Used for `connect` (all platforms) and, on Linux/macOS only, `discover_services`/read/write/
+/// subscribe/unsubscribe - see win_gatt.rs for why Windows doesn't route those through here.
 async fn retry_gatt<T, F, Fut>(label: &str, attempt_timeout: Duration, max_attempts: u32, mut op: F) -> Result<T, String>
 where
 	F: FnMut() -> Fut,

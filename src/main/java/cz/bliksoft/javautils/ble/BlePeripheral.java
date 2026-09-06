@@ -17,15 +17,16 @@ import com.fasterxml.jackson.databind.JsonNode;
  */
 public class BlePeripheral {
 
-	// Must exceed the sidecar's own retry budget for the corresponding op (ble-bridge's
-	// retry_gatt), or the Java side times out before the sidecar's own retries - which exist to
-	// ride out transient OS-level BLE delays - get a chance to finish. connect: ~21.5s retry
-	// budget + a 2s post-connect settle delay = ~23.5s worst case.
+	// Must exceed the sidecar's own worst-case time for the corresponding op, or the Java side
+	// times out before the sidecar - retrying to ride out transient OS-level BLE delays - gets a
+	// chance to finish. connect: ~21.5s retry budget (ble-bridge's retry_gatt) + a 2s post-connect
+	// settle delay = ~23.5s worst case.
 	private static final long CONNECT_TIMEOUT_MS = 30000;
-	// subscribe/read/write/unsubscribe can each chain an implicit discover_services first (if
-	// characteristics aren't cached yet), whose own retry budget (~46s, widened for a Windows/
-	// WinRT quirk - see ble-bridge's DISCOVER_ATTEMPT_TIMEOUT) stacks with the op's own (~21.5s):
-	// ~67.5s worst case.
+	// On Linux/macOS, subscribe/read/write/unsubscribe can each chain an implicit discover_services
+	// first (if characteristics aren't cached yet), whose own retry budget (~46s) stacks with the
+	// op's own (~21.5s): ~67.5s worst case. On Windows those same calls go through win_gatt.rs
+	// instead, which has no internal retry loop - this timeout is also the only bound on how long a
+	// stuck WinRT call there is given before the caller gets a BleTimeoutException.
 	private static final long DEFAULT_TIMEOUT_MS = 75000;
 
 	private final BleAdapter adapter;
