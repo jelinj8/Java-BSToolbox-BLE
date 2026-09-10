@@ -10,13 +10,19 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use btleplug::api::{
-	BDAddr, Central, CentralEvent, CentralState, ConnectionParameterPreset, Manager as _, Peripheral as _, ScanFilter,
+	Central, CentralEvent, CentralState, ConnectionParameterPreset, Manager as _, Peripheral as _, ScanFilter,
 };
 // Only used by the non-Windows GATT path (see platform_* functions below) - Windows bypasses
 // btleplug's GATT layer entirely, see win_gatt.rs.
 #[cfg(not(target_os = "windows"))]
 use btleplug::api::{CharPropFlags, WriteType};
-use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
+// BDAddr/PeripheralId: only used by get_peripheral's add_peripheral() fallback, which is
+// Windows-only - see its own doc comment for why.
+#[cfg(target_os = "windows")]
+use btleplug::api::BDAddr;
+#[cfg(target_os = "windows")]
+use btleplug::platform::PeripheralId;
+use btleplug::platform::{Adapter, Manager, Peripheral};
 use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -424,10 +430,12 @@ async fn get_peripheral(state: &AppState, address: &str) -> Result<Peripheral, S
 	// sees the same device's advertisements fine (filed upstream as btleplug#472 - see
 	// win_gatt.rs's module doc for the matching supplementary-watcher half of this workaround).
 	// add_peripheral() (Central trait) sidesteps the problem by constructing a peripheral
-	// straight from the address - Windows implements this as of btleplug 0.13 (a device the OS
-	// already knows, bonded or not, doesn't need to have been seen advertising first); other
-	// backends currently return NotSupported, which just
-	// falls through to the error below same as before.
+	// straight from the address - a device the OS already knows, bonded or not, doesn't need to
+	// have been seen advertising first. Windows-only: `PeripheralId::from(BDAddr)` only exists on
+	// the winrtble/droidplug backends (btleplug 0.13) - bluez's PeripheralId wraps a D-Bus device
+	// path, corebluetooth's a CoreBluetooth-assigned Uuid, neither constructible from a bare
+	// address - so this fallback wouldn't even compile, let alone help, on Linux/macOS.
+	#[cfg(target_os = "windows")]
 	if let Ok(addr) = address.parse::<BDAddr>() {
 		if let Ok(p) = state.adapter.add_peripheral(&PeripheralId::from(addr)).await {
 			state.peripherals.lock().unwrap().insert(key.clone(), p.clone());
