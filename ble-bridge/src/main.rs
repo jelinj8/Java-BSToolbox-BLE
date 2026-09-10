@@ -143,6 +143,13 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 					}
 				}
 			}
+			// Windows-only: btleplug's own scan can never observe a scan-response-only local name
+			// (see win_gatt.rs's module doc, "Scan-response local names") - start the supplementary
+			// watcher that catches it, so handle_central_event below can fill it in.
+			#[cfg(target_os = "windows")]
+			if let Err(e) = win_gatt::ensure_name_watcher() {
+				eprintln!("[ble-bridge] name watcher init failed: {}", e);
+			}
 			if let Err(e) = state.adapter.start_scan(filter).await {
 				let _ = tx.send(err_response(&id, e.to_string()));
 				return;
@@ -152,10 +159,17 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 			tokio::spawn(async move {
 				tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
 				let _ = state2.adapter.stop_scan().await;
+				#[cfg(target_os = "windows")]
+				win_gatt::stop_name_watcher();
 				let _ = tx2.send(ok_response(&id, json!({})));
 			});
 		}
-		Command::StopScan { id } => respond(&tx, &id, state.adapter.stop_scan().await.map(|_| json!({}))),
+		Command::StopScan { id } => {
+			let result = state.adapter.stop_scan().await.map(|_| json!({}));
+			#[cfg(target_os = "windows")]
+			win_gatt::stop_name_watcher();
+			respond(&tx, &id, result);
+		}
 		Command::Connect { id, address } => match get_peripheral(&state, &address).await {
 			Ok(p) => {
 				let p2 = p.clone();
@@ -246,10 +260,18 @@ async fn handle_central_event(state: &Arc<AppState>, tx: &UnboundedSender<Value>
 				if let Ok(Some(props)) = p.properties().await {
 					let addr = props.address.to_string().to_uppercase();
 					state.peripherals.lock().unwrap().insert(addr.clone(), p.clone());
+					// Windows: btleplug's own local_name is often None here even once the real
+					// name has been advertised (see win_gatt.rs's module doc, "Scan-response local
+					// names") - prefer the supplementary watcher's cache, falling back to
+					// btleplug's own value in case it ever does have one.
+					#[cfg(target_os = "windows")]
+					let name = win_gatt::cached_name(&addr).or(props.local_name);
+					#[cfg(not(target_os = "windows"))]
+					let name = props.local_name;
 					let _ = tx.send(json!({
 						"type": "device_found",
 						"address": addr,
-						"name": props.local_name,
+						"name": name,
 						"rssi": props.rssi,
 					}));
 				}
