@@ -1,7 +1,11 @@
 # BSToolbox-BLE
 
 Cross-platform Bluetooth Low Energy (BLE) client library for Java (Windows + Linux; macOS
-possible but not built/tested here yet).
+possible but not built/tested here yet). Effectively a Java wrapper around
+[btleplug](https://github.com/deviceplug/btleplug) — all the actual platform-level BLE work
+(WinRT/BlueZ/CoreBluetooth) happens there, via the `ble-bridge` Rust sidecar; this library adds the
+Java API, the sidecar process/IPC boundary, and a handful of Windows-specific workarounds for gaps
+in `btleplug`'s own Windows backend (see "Platform backends" below).
 
 ## Why a sidecar process instead of a native binding
 
@@ -148,6 +152,15 @@ exercised it against real hardware.
 
 The public API is deliberately generic GATT-level (scan/connect/discover/read/write/subscribe) —
 no assumptions about any particular peripheral or protocol.
+
+## Credits
+
+This library exists to give Java the same cross-platform BLE support
+[btleplug](https://github.com/deviceplug/btleplug) already gives Rust — nearly everything at the
+protocol/OS level (scanning, connecting, GATT) is `btleplug` doing the actual work behind
+`ble-bridge`; see "Platform backends" above for the specific Windows-only gaps this library works
+around on top of it, several [reported upstream](https://github.com/deviceplug/btleplug/issues/472).
+Currently pinned to `btleplug` 0.13 (`ble-bridge/Cargo.toml`).
 
 ## License
 
