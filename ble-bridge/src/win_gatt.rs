@@ -47,17 +47,25 @@
 //! `add_peripheral()` fallback in `get_peripheral` can likely both go.
 //!
 //! Rather than trying to argue Windows out of dropping the advertisement, this runs a second,
-//! independent `BluetoothLEAdvertisementWatcher` alongside `btleplug`'s own - unfiltered, and
-//! without touching either problem setting - and forwards every peripheral *it* sees straight into
-//! the same `device_found` stream `handle_central_event` (Windows-only) populates from `btleplug`'s
-//! events, address and name taken directly from this watcher's own advertisement data (not routed
-//! through `btleplug`'s `Peripheral`/`PeripheralProperties` at all, since `btleplug` never learns
-//! this address exists in the first place). Devices both watchers see just get reported twice -
-//! already how repeated advertisements within one scan behave, and every existing caller already
-//! dedupes `device_found` by address. See `main.rs`'s `get_peripheral` for the matching other half
-//! of this: `Central::add_peripheral()` (btleplug 0.13+) lets `Connect` reach such a device by
-//! address even though `btleplug`'s own scan never discovered it, so discovery and connectability
-//! are fixed independently but end up covering the same gap.
+//! independent `BluetoothLEAdvertisementWatcher` alongside `btleplug`'s own - without touching
+//! either problem setting - and forwards every peripheral *it* sees straight into the same
+//! `device_found` stream `handle_central_event` (Windows-only) populates from `btleplug`'s events,
+//! address and name taken directly from this watcher's own advertisement data (not routed through
+//! `btleplug`'s `Peripheral`/`PeripheralProperties` at all, since `btleplug` never learns this
+//! address exists in the first place). It respects the same caller-requested service-UUID filter
+//! `btleplug`'s own watcher gets (`FilterState`), via the identical two-step software-filter logic
+//! `btleplug` 0.13 itself uses for scan responses (a packet matches directly, or - lacking a
+//! service UUID of its own, as scan responses always do - passes if its address already matched
+//! on an earlier packet this scan). Devices both watchers see just get reported twice - already how
+//! repeated advertisements within one scan behave, and every existing caller already dedupes
+//! `device_found` by address. See `main.rs`'s `get_peripheral` for the matching other half of this:
+//! `Central::add_peripheral()` (btleplug 0.13+) lets `Connect` reach such a device by address even
+//! though `btleplug`'s own scan never discovered it, so discovery and connectability are fixed
+//! independently but end up covering the same gap. A third piece covers `read_rssi` specifically:
+//! `btleplug`'s own version depends on its own scan having cached a value for that peripheral,
+//! which - for the same reason - never happens for one reached only via `add_peripheral()`; this
+//! watcher separately caches the latest RSSI it observes per address (`RSSI_CACHE`,
+//! unconditionally, independent of the filter above) as a fallback for exactly that case.
 //!
 //! Tied to the same `Scan`/`StopScan` lifecycle as `btleplug`'s own watcher, not left running for
 //! the life of the process: an advertisement watcher left scanning in the background indefinitely
@@ -74,7 +82,8 @@ use serde_json::{json, Value};
 use tokio::sync::mpsc::UnboundedSender;
 use uuid::Uuid;
 use windows::Devices::Bluetooth::Advertisement::{
-	BluetoothLEAdvertisementReceivedEventArgs, BluetoothLEAdvertisementWatcher, BluetoothLEScanningMode,
+	BluetoothLEAdvertisementReceivedEventArgs, BluetoothLEAdvertisementType, BluetoothLEAdvertisementWatcher,
+	BluetoothLEScanningMode,
 };
 use windows::Devices::Bluetooth::{BluetoothDeviceId, BluetoothLEDevice};
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
@@ -92,11 +101,38 @@ use crate::hex_encode;
 /// `BluetoothLEAdvertisementWatcher`.
 static SCAN_WATCHER: Mutex<Option<BluetoothLEAdvertisementWatcher>> = Mutex::new(None);
 
-/// Starts (or resumes, if already constructed) the supplementary, filter-free advertisement
-/// watcher, forwarding every peripheral it sees as a `device_found` event on `tx`. Call once per
-/// `Scan` command; pair with `stop_scan_watcher` on `StopScan`/timeout. See the module doc comment
-/// ("Supplementary scan watcher") for why this exists.
-pub fn ensure_scan_watcher(tx: UnboundedSender<Value>) -> Result<(), String> {
+/// The `Received` handler is registered once (see `SCAN_WATCHER`) and reads this on every event,
+/// rather than being recreated per `Scan` call - so a caller-requested service-UUID filter (if
+/// any) has to live in shared state the handler closure can see, not just be captured at handler-
+/// construction time. `ensure_scan_watcher` replaces this (filter + a fresh match cache) on every
+/// call, mirroring btleplug's own `BLEWatcher::start` building a fresh `MatchCache` per scan.
+struct FilterState {
+	filter: Option<GUID>,
+	/// Addresses whose *own* advertisement matched `filter` - lets a later scan-response packet
+	/// from the same address through too, even though scan responses never carry a service UUID
+	/// to match on themselves. Same two-step logic as btleplug 0.13's own software filter.
+	matched: HashMap<u64, ()>,
+}
+static FILTER_STATE: Mutex<Option<FilterState>> = Mutex::new(None);
+
+/// Address -> latest RSSI this watcher has observed, from *any* advertisement packet regardless of
+/// `FilterState` (cheap to keep for every address seen, and useful for a reconnect against an
+/// address last seen under a different filter). Exists specifically because `btleplug`'s own
+/// `read_rssi()` depends on its own scan having populated an internal cache for that peripheral -
+/// which never happens for one reached only via the `add_peripheral()` fallback in `main.rs`'s
+/// `get_peripheral` (btleplug's own scan never discovered it in the first place, see the module doc
+/// comment above), so `read_rssi()` fails with `NotConnected` there even while genuinely connected.
+/// `read_rssi` in `main.rs` falls back to this cache when that happens.
+static RSSI_CACHE: Mutex<Option<HashMap<u64, i16>>> = Mutex::new(None);
+
+/// Starts (or resumes, if already constructed) the supplementary advertisement watcher, forwarding
+/// every peripheral matching `filter_uuid` (or everything, if `None`) as a `device_found` event on
+/// `tx`. Call once per `Scan` command; pair with `stop_scan_watcher` on `StopScan`/timeout. See the
+/// module doc comment ("Supplementary scan watcher") for why this exists.
+pub fn ensure_scan_watcher(tx: UnboundedSender<Value>, filter_uuid: Option<Uuid>) -> Result<(), String> {
+	*FILTER_STATE.lock().unwrap() =
+		Some(FilterState { filter: filter_uuid.as_ref().map(to_guid), matched: HashMap::new() });
+
 	let mut guard = SCAN_WATCHER.lock().unwrap();
 	if let Some(watcher) = guard.as_ref() {
 		return watcher.Start().map_err(|e| e.to_string());
@@ -104,22 +140,50 @@ pub fn ensure_scan_watcher(tx: UnboundedSender<Value>) -> Result<(), String> {
 	let watcher = BluetoothLEAdvertisementWatcher::new().map_err(|e| e.to_string())?;
 	watcher.SetScanningMode(BluetoothLEScanningMode::Active).map_err(|e| e.to_string())?;
 	// Deliberately does NOT set AllowExtendedAdvertisements/UseCodedPhy (unlike btleplug's own
-	// watcher) and sets no AdvertisementFilter - see the module doc comment for why both matter.
+	// watcher) and sets no OS-level AdvertisementFilter (filtering, if any, happens in the handler
+	// below instead) - see the module doc comment for why both matter.
 	// Explicit type on `handler` (not the closure params) - same pattern btleplug's own
 	// BLEWatcher::start uses, so inference doesn't depend on the later Received() call below.
 	let handler: TypedEventHandler<BluetoothLEAdvertisementWatcher, BluetoothLEAdvertisementReceivedEventArgs> = TypedEventHandler::new(
 		move |_sender, args: Ref<BluetoothLEAdvertisementReceivedEventArgs>| {
 			if let Ok(args) = args.ok() {
 				if let (Ok(raw_address), Ok(advertisement)) = (args.BluetoothAddress(), args.Advertisement()) {
-					if let Ok(address) = BDAddr::try_from(raw_address) {
-						let name = advertisement.LocalName().ok().map(|h| h.to_string()).filter(|s| !s.is_empty());
-						let rssi = args.RawSignalStrengthInDBm().ok();
-						let _ = tx.send(json!({
-							"type": "device_found",
-							"address": address.to_string(),
-							"name": name,
-							"rssi": rssi,
-						}));
+					if let Ok(rssi) = args.RawSignalStrengthInDBm() {
+						let mut cache = RSSI_CACHE.lock().unwrap();
+						cache.get_or_insert_with(HashMap::new).insert(raw_address, rssi);
+					}
+					let passes = {
+						let mut fs_guard = FILTER_STATE.lock().unwrap();
+						match fs_guard.as_mut() {
+							None => true,
+							Some(fs) => match fs.filter {
+								None => true,
+								Some(target) => {
+									let is_match = advertisement.ServiceUuids().map(|uuids| {
+										(0..uuids.Size().unwrap_or(0)).any(|i| uuids.GetAt(i).map(|g| g == target).unwrap_or(false))
+									}).unwrap_or(false);
+									if is_match {
+										fs.matched.insert(raw_address, ());
+										true
+									} else {
+										matches!(args.AdvertisementType(), Ok(BluetoothLEAdvertisementType::ScanResponse))
+											&& fs.matched.contains_key(&raw_address)
+									}
+								}
+							},
+						}
+					};
+					if passes {
+						if let Ok(address) = BDAddr::try_from(raw_address) {
+							let name = advertisement.LocalName().ok().map(|h| h.to_string()).filter(|s| !s.is_empty());
+							let rssi = args.RawSignalStrengthInDBm().ok();
+							let _ = tx.send(json!({
+								"type": "device_found",
+								"address": address.to_string(),
+								"name": name,
+								"rssi": rssi,
+							}));
+						}
 					}
 				}
 			}
@@ -138,6 +202,12 @@ pub fn stop_scan_watcher() {
 	if let Some(watcher) = SCAN_WATCHER.lock().unwrap().as_ref() {
 		let _ = watcher.Stop();
 	}
+}
+
+/// Looks up the latest RSSI `RSSI_CACHE` has for `raw_address` (the same `u64` form
+/// `btleplug::api::BDAddr`/`args.BluetoothAddress()` use), if any. See `RSSI_CACHE`'s doc comment.
+pub fn cached_rssi(raw_address: u64) -> Option<i16> {
+	RSSI_CACHE.lock().unwrap().as_ref().and_then(|m| m.get(&raw_address).copied())
 }
 
 /// Holds the characteristic a live subscription's `ValueChanged` handler is registered on, and the

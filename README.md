@@ -53,12 +53,15 @@ peripheral has been observed to become entirely invisible to scan once
 `AllowExtendedAdvertisements` is enabled - not filtered, never reported at all, even by an
 otherwise-identical *unfiltered* scan (filed upstream as
 [btleplug#472](https://github.com/deviceplug/btleplug/issues/472), unfixed as of 0.13). The
-supplementary watcher skips both settings and reports whatever it sees directly; a device both
-watchers see is just reported twice, which every caller already handles (repeated advertisements
-within one scan behave the same way). `Connect` gets the matching fix on the other end: if a
-peripheral was never discovered via either scan watcher, `get_peripheral` falls back to
-`Central::add_peripheral()` (new in `btleplug` 0.13, Windows-supported) to reach it by address
-anyway.
+supplementary watcher skips both settings, applies the same caller-requested service-UUID filter
+`btleplug`'s own watcher gets (software-side, same two-step logic `btleplug` 0.13 itself uses), and
+reports whatever it sees directly; a device both watchers see is just reported twice, which every
+caller already handles (repeated advertisements within one scan behave the same way). `Connect`
+gets the matching fix on the other end: if a peripheral was never discovered via either scan
+watcher, `get_peripheral` falls back to `Central::add_peripheral()` (new in `btleplug` 0.13,
+Windows-supported) to reach it by address anyway. `readRssi()` gets a third, matching fix: the
+supplementary watcher also caches the latest RSSI per address it observes, used as a fallback when
+`btleplug`'s own value (which needs its own scan to have cached one) is unavailable.
 
 Read `win_gatt.rs`'s module doc comment for the full reasoning on both workarounds before touching
 that file.
@@ -93,6 +96,25 @@ try (BleAdapter adapter = new BleAdapter()) {
     peripheral.writeCharacteristic(SERVICE_UUID, TX_CHAR_UUID, someBytes, true);
 }
 ```
+
+### Connection-quality / diagnostic API
+
+Beyond the generic GATT surface above, `BleAdapter`/`BlePeripheral` also expose:
+
+```java
+adapter.getAdapterState();               // AdapterState.POWERED_ON / POWERED_OFF / UNKNOWN
+peripheral.getMtu();                     // negotiated ATT MTU in bytes
+peripheral.readRssi();                   // current signal strength in dBm
+peripheral.getConnectionParameters();    // ConnectionParameters (interval/latency/supervision timeout), or null
+peripheral.requestConnectionParameters(ConnectionParameterPreset.THROUGHPUT_OPTIMIZED); // advisory - read
+                                          // getConnectionParameters() afterward to see what actually took effect
+```
+
+Backed by trait-default `btleplug::api::Peripheral`/`Central` methods that return `NotSupported` on
+backends that don't implement them - confirmed working on Windows for all five; other platforms
+untested. `readRssi()` on Windows additionally falls back to the supplementary scan watcher's own
+RSSI cache (see below) for a peripheral reached only via `add_peripheral()`, since `btleplug`'s own
+value depends on its own scan having cached one - which never happens in that case.
 
 ## Building the sidecar
 

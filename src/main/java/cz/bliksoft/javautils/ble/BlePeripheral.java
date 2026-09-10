@@ -109,6 +109,63 @@ public class BlePeripheral {
 		this.disconnectListener = listener;
 	}
 
+	/**
+	 * Returns the currently negotiated ATT MTU in bytes (usable characteristic payload per write
+	 * is this minus 3 bytes of ATT overhead). Backend support varies by platform.
+	 */
+	public int getMtu() throws BleException {
+		JsonNode resp = adapter.sendRequest("get_mtu", fields("address", address), DEFAULT_TIMEOUT_MS);
+		return resp.path("mtu").asInt();
+	}
+
+	/**
+	 * Reads the current RSSI (signal strength) in dBm. Behavior varies by platform - see
+	 * {@code btleplug::api::Peripheral::read_rssi}'s own doc for the per-platform freshness
+	 * caveats (e.g. Windows returns the most recent value from advertisements, which needs
+	 * scanning to be active to stay fresh).
+	 */
+	public int readRssi() throws BleException {
+		JsonNode resp = adapter.sendRequest("read_rssi", fields("address", address), DEFAULT_TIMEOUT_MS);
+		return resp.path("rssi").asInt();
+	}
+
+	/**
+	 * Returns the current BLE connection parameters as reported by the OS, or {@code null} if
+	 * this platform doesn't expose them (backend support varies). Throws if not connected.
+	 */
+	public ConnectionParameters getConnectionParameters() throws BleException {
+		JsonNode resp = adapter.sendRequest("get_connection_parameters", fields("address", address), DEFAULT_TIMEOUT_MS);
+		if (!resp.has("interval_us")) {
+			return null;
+		}
+		return new ConnectionParameters(resp.path("interval_us").asLong(), resp.path("latency").asInt(),
+				resp.path("supervision_timeout_us").asLong());
+	}
+
+	/**
+	 * Requests a connection parameter update using a preset - e.g.
+	 * {@link ConnectionParameterPreset#THROUGHPUT_OPTIMIZED} before a bulk transfer, switched back
+	 * to {@link ConnectionParameterPreset#BALANCED} afterward. This is only a request: the remote
+	 * device may accept or reject it: read {@link #getConnectionParameters()} afterward to see
+	 * what actually took effect, rather than assuming the request was honored. Throws
+	 * {@link BleException} on backends that don't support this (currently: confirmed on Windows).
+	 */
+	public void requestConnectionParameters(ConnectionParameterPreset preset) throws BleException {
+		String presetStr;
+		switch (preset) {
+		case THROUGHPUT_OPTIMIZED:
+			presetStr = "throughput_optimized";
+			break;
+		case POWER_OPTIMIZED:
+			presetStr = "power_optimized";
+			break;
+		default:
+			presetStr = "balanced";
+		}
+		adapter.sendRequest("request_connection_parameters", fields("address", address, "preset", presetStr),
+				DEFAULT_TIMEOUT_MS);
+	}
+
 	// --- internals used by BleAdapter's reader thread
 	// -----------------------------------------
 

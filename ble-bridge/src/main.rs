@@ -9,7 +9,9 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use btleplug::api::{BDAddr, Central, CentralEvent, Manager as _, Peripheral as _, ScanFilter};
+use btleplug::api::{
+	BDAddr, Central, CentralEvent, CentralState, ConnectionParameterPreset, Manager as _, Peripheral as _, ScanFilter,
+};
 // Only used by the non-Windows GATT path (see platform_* functions below) - Windows bypasses
 // btleplug's GATT layer entirely, see win_gatt.rs.
 #[cfg(not(target_os = "windows"))]
@@ -37,6 +39,11 @@ enum Command {
 	Write { id: String, address: String, service_uuid: String, char_uuid: String, value_hex: String, with_response: bool },
 	Subscribe { id: String, address: String, service_uuid: String, char_uuid: String },
 	Unsubscribe { id: String, address: String, service_uuid: String, char_uuid: String },
+	AdapterState { id: String },
+	ReadRssi { id: String, address: String },
+	GetMtu { id: String, address: String },
+	GetConnectionParameters { id: String, address: String },
+	RequestConnectionParameters { id: String, address: String, preset: String },
 }
 
 struct AppState {
@@ -145,10 +152,11 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 			}
 			// Windows-only: btleplug's own scan watcher hardcodes settings that make it miss some
 			// real peripherals entirely (see win_gatt.rs's module doc, "Supplementary scan
-			// watcher") - run a second, unfiltered watcher alongside it that reports everything
-			// it sees directly, independent of btleplug's own device_found events below.
+			// watcher") - run a second watcher alongside it (same filter as btleplug's own, so a
+			// caller-requested service-UUID filter isn't silently ignored) that reports what it
+			// sees directly, independent of btleplug's own device_found events below.
 			#[cfg(target_os = "windows")]
-			if let Err(e) = win_gatt::ensure_scan_watcher(tx.clone()) {
+			if let Err(e) = win_gatt::ensure_scan_watcher(tx.clone(), filter.services.first().copied()) {
 				eprintln!("[ble-bridge] supplementary scan watcher init failed: {}", e);
 			}
 			if let Err(e) = state.adapter.start_scan(filter).await {
@@ -251,6 +259,80 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 				}
 			}
 		}
+		// Connection-quality/diagnostic queries, not part of the original GATT-level surface -
+		// all backed by trait-default btleplug::api::Peripheral/Central methods that return
+		// Err(NotSupported) on backends that don't implement them (currently: Windows does, for
+		// all five; other platforms vary - see README.md).
+		Command::AdapterState { id } => {
+			respond(&tx, &id, state.adapter.adapter_state().await.map(|s| json!({ "state": central_state_str(&s) })));
+		}
+		Command::ReadRssi { id, address } => match get_peripheral(&state, &address).await {
+			Ok(p) => match p.read_rssi().await {
+				Ok(rssi) => {
+					let _ = tx.send(ok_response(&id, json!({ "rssi": rssi })));
+				}
+				// Windows: btleplug's own read_rssi() depends on its own scan having cached this
+				// peripheral's RSSI, which never happens for one reached only via the
+				// add_peripheral() fallback below (btleplug's own scan never discovered it -
+				// same root cause as the supplementary scan watcher exists for, see win_gatt.rs's
+				// module doc). Fall back to that watcher's own RSSI cache before giving up.
+				Err(e) => {
+					#[cfg(target_os = "windows")]
+					let fallback = win_gatt::cached_rssi(p.address().into());
+					#[cfg(not(target_os = "windows"))]
+					let fallback: Option<i16> = None;
+					match fallback {
+						Some(rssi) => {
+							let _ = tx.send(ok_response(&id, json!({ "rssi": rssi })));
+						}
+						None => {
+							let _ = tx.send(err_response(&id, e.to_string()));
+						}
+					}
+				}
+			},
+			Err(e) => tx.send(err_response(&id, e)).ok().unwrap_or(()),
+		},
+		Command::GetMtu { id, address } => match get_peripheral(&state, &address).await {
+			Ok(p) => {
+				let _ = tx.send(ok_response(&id, json!({ "mtu": p.mtu() })));
+			}
+			Err(e) => tx.send(err_response(&id, e)).ok().unwrap_or(()),
+		},
+		Command::GetConnectionParameters { id, address } => match get_peripheral(&state, &address).await {
+			Ok(p) => respond(
+				&tx,
+				&id,
+				p.connection_parameters().await.map(|opt| match opt {
+					Some(cp) => json!({
+						"interval_us": cp.interval_us,
+						"latency": cp.latency,
+						"supervision_timeout_us": cp.supervision_timeout_us,
+					}),
+					None => json!({}),
+				}),
+			),
+			Err(e) => tx.send(err_response(&id, e)).ok().unwrap_or(()),
+		},
+		Command::RequestConnectionParameters { id, address, preset } => match get_peripheral(&state, &address).await {
+			Ok(p) => {
+				let preset = match preset.as_str() {
+					"throughput_optimized" => ConnectionParameterPreset::ThroughputOptimized,
+					"power_optimized" => ConnectionParameterPreset::PowerOptimized,
+					_ => ConnectionParameterPreset::Balanced,
+				};
+				respond(&tx, &id, p.request_connection_parameters(preset).await.map(|_| json!({})));
+			}
+			Err(e) => tx.send(err_response(&id, e)).ok().unwrap_or(()),
+		},
+	}
+}
+
+fn central_state_str(state: &CentralState) -> &'static str {
+	match state {
+		CentralState::Unknown => "unknown",
+		CentralState::PoweredOn => "powered_on",
+		CentralState::PoweredOff => "powered_off",
 	}
 }
 

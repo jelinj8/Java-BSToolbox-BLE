@@ -114,6 +114,22 @@ public class BleAdapter implements AutoCloseable {
 		return peripherals.computeIfAbsent(key, k -> new BlePeripheral(this, k));
 	}
 
+	/**
+	 * Queries the Bluetooth radio's current power state. Useful for distinguishing "nothing
+	 * found" from "Bluetooth is off" after an empty {@link #scan}.
+	 */
+	public AdapterState getAdapterState() throws BleException {
+		JsonNode resp = sendRequest("adapter_state", null, DEFAULT_TIMEOUT_MS);
+		switch (resp.path("state").asText("unknown")) {
+		case "powered_on":
+			return AdapterState.POWERED_ON;
+		case "powered_off":
+			return AdapterState.POWERED_OFF;
+		default:
+			return AdapterState.UNKNOWN;
+		}
+	}
+
 	public boolean isAlive() {
 		return alive && process.isAlive();
 	}

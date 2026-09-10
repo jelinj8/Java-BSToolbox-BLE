@@ -72,9 +72,15 @@ only thing that talks to its stdin/stdout. The protocol is one JSON object per l
 directions:
 
 - **Commands** (Java → Rust): tagged by a `cmd` field (`scan`, `stop_scan`, `connect`, `disconnect`,
-  `discover_services`, `read`, `write`, `subscribe`, `unsubscribe`), each carrying an `id` used to
-  match it to its response. See the `Command` enum in `ble-bridge/src/main.rs` and the
-  `BleAdapter.sendRequest` overloads for the canonical field lists.
+  `discover_services`, `read`, `write`, `subscribe`, `unsubscribe`, plus the connection-quality/
+  diagnostic group `adapter_state`, `read_rssi`, `get_mtu`, `get_connection_parameters`,
+  `request_connection_parameters`), each carrying an `id` used to match it to its response. See the
+  `Command` enum in `ble-bridge/src/main.rs` and the `BleAdapter.sendRequest` overloads for the
+  canonical field lists. The diagnostic group is all backed by trait-default
+  `btleplug::api::Peripheral`/`Central` methods that return `Err(NotSupported)` where a backend
+  doesn't implement them - confirmed working on Windows for all five; other platforms untested.
+  `read_rssi` on Windows additionally falls back to `win_gatt.rs`'s supplementary-watcher RSSI
+  cache when `btleplug`'s own value is unavailable - see that module's doc comment.
 - **Responses** (Rust → Java): `{"type": "response", "id": ..., "ok": bool, ...}`. `BleAdapter`
   keeps a `CompletableFuture` per in-flight `id` in `pending`, resolved or failed by
   `handleResponse` when the matching line arrives.
