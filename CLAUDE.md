@@ -14,12 +14,24 @@ current status (works via the OS's own system prompt today; programmatic pairing
 prompt, PIN supplied automatically - is planned but not implemented, see "Planned" below).
 
 Two modules:
-- `ble-bridge/` — the Rust sidecar (Cargo project, `cargo build --release`). `main.rs` holds the
-  wire protocol and the `btleplug`-backed implementation used on every platform; `win_gatt.rs` is a
-  Windows-only direct-WinRT GATT path (discover/read/write/subscribe/unsubscribe only — connect/
-  disconnect/scan stay on btleplug there too) that works around a btleplug bug where an abandoned
-  WinRT operation can permanently block every later GATT call on the same device object. See
-  `win_gatt.rs`'s module doc comment and README.md before touching either GATT path.
+- `ble-bridge/` — the Rust sidecar (Cargo project, `cargo build --release`, `btleplug` 0.13).
+  `main.rs` holds the wire protocol and the `btleplug`-backed implementation used on every
+  platform; `win_gatt.rs` is Windows-only and works around two separate, unrelated `btleplug`
+  Windows-backend gaps:
+  - A direct-WinRT GATT path (discover/read/write/subscribe/unsubscribe only — connect/disconnect
+    stay on `btleplug`) that works around a bug where an abandoned WinRT operation can permanently
+    block every later GATT call on the same device object.
+  - A second, unfiltered `BluetoothLEAdvertisementWatcher` run alongside `btleplug`'s own scan
+    watcher, forwarding every peripheral it sees independently — `btleplug`'s Windows watcher
+    hardcodes `SetAllowExtendedAdvertisements(true)`/`SetUseCodedPhy(true)` with no way to disable
+    either, and at least one real peripheral has been observed to become entirely invisible to
+    scan once that's enabled (filed upstream as
+    [btleplug#472](https://github.com/deviceplug/btleplug/issues/472), unfixed as of 0.13).
+    `main.rs`'s `get_peripheral` pairs this with a `Central::add_peripheral()` fallback (new in
+    0.13, Windows-supported) so `Connect` can still reach such a peripheral by address even though
+    `btleplug`'s own scan never discovered it.
+
+  See `win_gatt.rs`'s module doc comment and README.md before touching either path.
 - `src/main/java/cz/bliksoft/javautils/ble/` — the Java client library.
 
 ## Build / test commands

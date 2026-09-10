@@ -36,16 +36,32 @@ BlueZ's D-Bus `Pair()` method with an agent registered to auto-respond with the 
 On Linux and macOS, every operation (scan/connect/disconnect/discover/read/write/subscribe) goes
 through `btleplug` directly.
 
-On Windows, only scan/connect/disconnect go through `btleplug`; discover/read/write/subscribe/
-unsubscribe are implemented directly against WinRT in `ble-bridge/src/win_gatt.rs`, bypassing
-`btleplug`'s Windows GATT layer entirely. Reason: that layer can leave an abandoned WinRT operation
-in a state that blocks every later GATT call on the same device object, with no way out via
-retries or timeouts (see [btleplug#325](https://github.com/deviceplug/btleplug/issues/325)).
-`win_gatt.rs` avoids this by resolving each service via a dedicated `BluetoothLEDevice` /
-`GattDeviceService` pair — cached and reused for every characteristic on that service, since two
-independent handles to the same service open at once make Windows reject GATT access outright —
-and looking up each characteristic by UUID on demand rather than enumerating the whole GATT
-profile. Read `win_gatt.rs`'s module doc comment for the full reasoning before touching that file.
+On Windows, connect/disconnect go through `btleplug`; discover/read/write/subscribe/unsubscribe
+are implemented directly against WinRT in `ble-bridge/src/win_gatt.rs`, bypassing `btleplug`'s
+Windows GATT layer entirely. Reason: that layer can leave an abandoned WinRT operation in a state
+that blocks every later GATT call on the same device object, with no way out via retries or
+timeouts (see [btleplug#325](https://github.com/deviceplug/btleplug/issues/325)). `win_gatt.rs`
+avoids this by resolving each service via a dedicated `BluetoothLEDevice` / `GattDeviceService`
+pair — cached and reused for every characteristic on that service, since two independent handles
+to the same service open at once make Windows reject GATT access outright — and looking up each
+characteristic by UUID on demand rather than enumerating the whole GATT profile.
+
+Scan on Windows is `btleplug`'s own watcher *plus* a second, independent one `win_gatt.rs` runs
+alongside it: `btleplug`'s Windows watcher hardcodes `SetAllowExtendedAdvertisements(true)` and
+`SetUseCodedPhy(true)`, with no way to disable either via its public API, and at least one real
+peripheral has been observed to become entirely invisible to scan once
+`AllowExtendedAdvertisements` is enabled - not filtered, never reported at all, even by an
+otherwise-identical *unfiltered* scan (filed upstream as
+[btleplug#472](https://github.com/deviceplug/btleplug/issues/472), unfixed as of 0.13). The
+supplementary watcher skips both settings and reports whatever it sees directly; a device both
+watchers see is just reported twice, which every caller already handles (repeated advertisements
+within one scan behave the same way). `Connect` gets the matching fix on the other end: if a
+peripheral was never discovered via either scan watcher, `get_peripheral` falls back to
+`Central::add_peripheral()` (new in `btleplug` 0.13, Windows-supported) to reach it by address
+anyway.
+
+Read `win_gatt.rs`'s module doc comment for the full reasoning on both workarounds before touching
+that file.
 
 ## Modules
 
@@ -99,10 +115,14 @@ jar. `NativeBinaryLoader` resolves that path from the JVM's `os.name`/`os.arch` 
 
 ## Status
 
-Verified end-to-end on Windows and Linux against a real peripheral (a Nordic UART Service-based
-device): scan, connect, discover, subscribe, read and write all work, including reconnect after a
-manual disconnect. macOS has no automated or manual verification yet — the sidecar builds for it,
-but nothing has exercised it against real hardware.
+Verified end-to-end on Windows and Linux against real peripherals: scan, connect, discover,
+subscribe, read and write all work, including reconnect after a manual disconnect. Confirmed
+against two independent devices with different GATT profiles - a custom-service e-paper display
+(CrowPanel) and a Nordic UART Service-based MeshCore radio - the latter specifically to shake out
+the Windows scan/discovery gaps described above (the radio was invisible to scan and
+unconnectable before the `win_gatt.rs` supplementary watcher and `add_peripheral()` fallback).
+macOS has no automated or manual verification yet — the sidecar builds for it, but nothing has
+exercised it against real hardware.
 
 The public API is deliberately generic GATT-level (scan/connect/discover/read/write/subscribe) —
 no assumptions about any particular peripheral or protocol.
