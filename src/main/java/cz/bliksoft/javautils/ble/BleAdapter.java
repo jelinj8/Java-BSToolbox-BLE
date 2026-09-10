@@ -31,6 +31,15 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
  * {@link DisconnectListener#onDisconnected} with reason
  * {@code "sidecar_crashed"}, never as a JVM crash. Create one
  * {@code BleAdapter} per BLE session; call {@link #close()} when done with it.
+ * <p>
+ * <b>Each {@code BleAdapter} has its own independent scan cache.</b> The sidecar only knows a
+ * peripheral is connectable once it's seen it via {@link #scan}; that knowledge lives in this
+ * specific adapter's own sidecar process, not anywhere shared or global. A peripheral discovered
+ * by scanning on one {@code BleAdapter} instance generally cannot be connected via a
+ * <em>different</em> {@code BleAdapter} that never scanned for it - doing so typically fails with
+ * "unknown peripheral address ... scan for it first" even though the address is valid and was
+ * just seen moments ago on the other instance. In practice this means: scan and connect using the
+ * <em>same</em> {@code BleAdapter}, and don't construct a fresh one per connection attempt.
  */
 public class BleAdapter implements AutoCloseable {
 
@@ -95,7 +104,11 @@ public class BleAdapter implements AutoCloseable {
 		this.scanListener = null;
 	}
 
-	/** Returns the (cached) handle for a peripheral address; does not connect. */
+	/**
+	 * Returns the (cached) handle for a peripheral address; does not connect. The address must
+	 * have been (or must still be, for {@link BlePeripheral#connect()} to succeed) discovered via
+	 * {@link #scan} on <em>this</em> {@code BleAdapter} instance - see the class doc.
+	 */
 	public BlePeripheral getPeripheral(String address) {
 		String key = address.toUpperCase(java.util.Locale.ROOT);
 		return peripherals.computeIfAbsent(key, k -> new BlePeripheral(this, k));

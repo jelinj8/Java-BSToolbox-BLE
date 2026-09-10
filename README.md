@@ -16,11 +16,20 @@ JSON on stdin/stdout. If the sidecar crashes or hangs, that surfaces as a normal
 It also sidesteps SimpleBLE's BUSL-1.1 licensing (commercial use requires a paid license);
 `btleplug` is MIT/Apache-2.0.
 
-**Pairing/bonding is out of scope.** If a peripheral's GATT requires OS-level bonding (MITM
-protection, a PIN prompt, etc), that has to happen through the OS's own Bluetooth settings before
-this library can connect to it. Neither `btleplug` nor a from-scratch pairing implementation is
-wired up here; `connect()` against an unpaired-but-bonding-required device will simply fail with a
-clear error.
+**Pairing/bonding is not implemented yet — planned.** Today, if a peripheral's GATT requires
+OS-level bonding (MITM protection, a PIN prompt, etc), that has to happen through the OS's own
+Bluetooth settings/system pairing prompt before this library can connect to it; neither `btleplug`
+nor a from-scratch pairing implementation is wired up here, and `connect()` against an
+unpaired-but-bonding-required device will simply fail with a clear error. That's acceptable for now
+(most GATT operations don't need it - confirmed a plain unencrypted service connects and works
+fine, unpaired, with no OS interaction at all), but **programmatic pairing is a desired feature for
+a future release**: triggering pairing from this library and auto-supplying a known PIN/passkey,
+without the OS's system prompt appearing at all. Needed for peripherals that require authenticated
+bonding just to expose their GATT service (e.g. Niimbot label printers), where popping OS UI isn't
+acceptable for an unattended/embedded caller. Would need a new sidecar command wrapping, per
+platform: Windows - `DeviceInformationPairing.PairAsync` with a custom pairing handler that answers
+a `PairingRequested` event with the PIN automatically instead of surfacing a system prompt; Linux -
+BlueZ's D-Bus `Pair()` method with an agent registered to auto-respond with the PIN.
 
 ## Platform backends
 

@@ -10,7 +10,8 @@ on `btleplug`) over newline-delimited JSON on stdin/stdout. This means a native/
 fault (common around pairing/connect) surfaces as a `BleSidecarException` or a
 `DisconnectListener` callback with reason `sidecar_crashed` — never a JVM crash. See README.md for
 the full rationale (including why SimpleBLE's BUSL-1.1 license was avoided) and pairing/bonding's
-explicit out-of-scope status.
+current status (works via the OS's own system prompt today; programmatic pairing - no system
+prompt, PIN supplied automatically - is planned but not implemented, see "Planned" below).
 
 Two modules:
 - `ble-bridge/` — the Rust sidecar (Cargo project, `cargo build --release`). `main.rs` holds the
@@ -88,6 +89,30 @@ Changing the protocol means editing **both** sides: the `Command` enum + respons
   keep receiving events across reconnects.
 - One `BleAdapter` = one sidecar process = one BLE session. `close()` closes the sidecar's stdin,
   waits up to 3s, then force-kills it, and fails any still-pending requests.
+
+## Planned: programmatic pairing
+
+Not implemented. Currently, a peripheral that requires OS-level bonding to expose its GATT service
+has to be paired through the OS's own Bluetooth settings/system prompt first - `connect()` against
+an unpaired-but-bonding-required device fails with a clear error otherwise. That's fine for
+peripherals that don't need bonding at all (confirmed: an unencrypted GATT service connects and
+works with zero OS interaction, unpaired), but is a real gap for ones that do - e.g. Niimbot label
+printers, a planned future consumer of this library, are expected to need authenticated bonding
+just to talk to them, and popping the OS's system pairing UI isn't acceptable for an
+unattended/embedded caller.
+
+Desired: a new sidecar command (e.g. `"pair"`) that pairs programmatically, supplying a known
+PIN/passkey automatically instead of surfacing any system prompt:
+- **Windows**: `DeviceInformationPairing.PairAsync(...)` with a custom pairing handler answering
+  the `PairingRequested` event with the PIN directly (`win_gatt.rs` already has the
+  `BluetoothLEDevice` resolution pattern this would build on).
+- **Linux**: BlueZ's D-Bus `Pair()` method with an agent registered to auto-respond with the PIN
+  (`btleplug`'s Linux backend doesn't expose pairing directly, so this would likely need to go
+  around it via direct D-Bus calls, similar in spirit to how `win_gatt.rs` goes around `btleplug`
+  on Windows for a different reason).
+
+Add the corresponding `BlePeripheral.pair(String pin)`-shaped method (or similar) to the Java API
+once the sidecar side exists.
 
 ## Release process
 

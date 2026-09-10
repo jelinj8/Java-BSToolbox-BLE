@@ -320,7 +320,12 @@ async fn get_peripheral(state: &AppState, address: &str) -> Result<Peripheral, S
 			}
 		}
 	}
-	Err(format!("unknown peripheral address {} - scan for it first", address))
+	Err(format!(
+		"unknown peripheral address {} - scan for it first on this same adapter/process \
+		 (each BleAdapter has its own independent scan cache - a peripheral discovered via a \
+		 different BleAdapter instance is not connectable here even if the address is valid)",
+		address
+	))
 }
 
 async fn find_characteristic(
