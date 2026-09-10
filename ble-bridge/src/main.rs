@@ -9,12 +9,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use btleplug::api::{Central, CentralEvent, Manager as _, Peripheral as _, ScanFilter};
+use btleplug::api::{BDAddr, Central, CentralEvent, Manager as _, Peripheral as _, ScanFilter};
 // Only used by the non-Windows GATT path (see platform_* functions below) - Windows bypasses
 // btleplug's GATT layer entirely, see win_gatt.rs.
 #[cfg(not(target_os = "windows"))]
 use btleplug::api::{CharPropFlags, WriteType};
-use btleplug::platform::{Adapter, Manager, Peripheral};
+use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -143,12 +143,13 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 					}
 				}
 			}
-			// Windows-only: btleplug's own scan can never observe a scan-response-only local name
-			// (see win_gatt.rs's module doc, "Scan-response local names") - start the supplementary
-			// watcher that catches it, so handle_central_event below can fill it in.
+			// Windows-only: btleplug's own scan watcher hardcodes settings that make it miss some
+			// real peripherals entirely (see win_gatt.rs's module doc, "Supplementary scan
+			// watcher") - run a second, unfiltered watcher alongside it that reports everything
+			// it sees directly, independent of btleplug's own device_found events below.
 			#[cfg(target_os = "windows")]
-			if let Err(e) = win_gatt::ensure_name_watcher() {
-				eprintln!("[ble-bridge] name watcher init failed: {}", e);
+			if let Err(e) = win_gatt::ensure_scan_watcher(tx.clone()) {
+				eprintln!("[ble-bridge] supplementary scan watcher init failed: {}", e);
 			}
 			if let Err(e) = state.adapter.start_scan(filter).await {
 				let _ = tx.send(err_response(&id, e.to_string()));
@@ -160,14 +161,14 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 				tokio::time::sleep(Duration::from_millis(timeout_ms)).await;
 				let _ = state2.adapter.stop_scan().await;
 				#[cfg(target_os = "windows")]
-				win_gatt::stop_name_watcher();
+				win_gatt::stop_scan_watcher();
 				let _ = tx2.send(ok_response(&id, json!({})));
 			});
 		}
 		Command::StopScan { id } => {
 			let result = state.adapter.stop_scan().await.map(|_| json!({}));
 			#[cfg(target_os = "windows")]
-			win_gatt::stop_name_watcher();
+			win_gatt::stop_scan_watcher();
 			respond(&tx, &id, result);
 		}
 		Command::Connect { id, address } => match get_peripheral(&state, &address).await {
@@ -260,18 +261,10 @@ async fn handle_central_event(state: &Arc<AppState>, tx: &UnboundedSender<Value>
 				if let Ok(Some(props)) = p.properties().await {
 					let addr = props.address.to_string().to_uppercase();
 					state.peripherals.lock().unwrap().insert(addr.clone(), p.clone());
-					// Windows: btleplug's own local_name is often None here even once the real
-					// name has been advertised (see win_gatt.rs's module doc, "Scan-response local
-					// names") - prefer the supplementary watcher's cache, falling back to
-					// btleplug's own value in case it ever does have one.
-					#[cfg(target_os = "windows")]
-					let name = win_gatt::cached_name(&addr).or(props.local_name);
-					#[cfg(not(target_os = "windows"))]
-					let name = props.local_name;
 					let _ = tx.send(json!({
 						"type": "device_found",
 						"address": addr,
-						"name": name,
+						"name": props.local_name,
 						"rssi": props.rssi,
 					}));
 				}
@@ -340,6 +333,21 @@ async fn get_peripheral(state: &AppState, address: &str) -> Result<Peripheral, S
 				state.peripherals.lock().unwrap().insert(key.clone(), p.clone());
 				return Ok(p);
 			}
+		}
+	}
+	// Some peripherals are never discovered via scan at all - e.g. on Windows, btleplug
+	// hardcodes SetAllowExtendedAdvertisements/SetUseCodedPhy on for its scan watcher, and at
+	// least one real device (a MeshCore radio) has been observed to stop advertising visibly to
+	// Windows entirely once that's enabled, even though an unfiltered raw watcher without it
+	// sees the same device's advertisements fine. add_peripheral() (Central trait) sidesteps the
+	// problem by constructing a peripheral straight from the address - Windows implements this
+	// as of btleplug 0.13 (a device the OS already knows, bonded or not, doesn't need to have
+	// been seen advertising first); other backends currently return NotSupported, which just
+	// falls through to the error below same as before.
+	if let Ok(addr) = address.parse::<BDAddr>() {
+		if let Ok(p) = state.adapter.add_peripheral(&PeripheralId::from(addr)).await {
+			state.peripherals.lock().unwrap().insert(key.clone(), p.clone());
+			return Ok(p);
 		}
 	}
 	Err(format!(

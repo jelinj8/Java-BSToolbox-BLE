@@ -30,28 +30,37 @@
 //! the life of the subscription (unlike a one-shot read/write) - `SUBSCRIPTIONS` keeps that alive;
 //! the device/service it depends on are kept alive independently by `SERVICES`.
 //!
-//! ## Scan-response local names (`ensure_name_watcher`/`cached_name`)
+//! ## Supplementary scan watcher (`ensure_scan_watcher`/`stop_scan_watcher`)
 //!
 //! A second, unrelated Windows-only scan gap lives here too: `btleplug`'s own Windows scan path
-//! (`winrtble::ble::watcher::BLEWatcher`, still used as-is for scan/connect/disconnect - see the
-//! module doc above) installs an OS-level `BluetoothLEAdvertisementFilter.Advertisement.ServiceUuids`
-//! filter so only advertisement packets that themselves carry the scanned-for service UUID reach its
-//! `Received` handler at all. A peripheral whose primary advertising packet carries the service UUID
-//! but whose *name* only fits in the separate scan-response packet (no room for both in one legacy
-//! ~31-byte packet - exactly this project's CrowPanel firmware) never has that scan-response packet
-//! reach `btleplug` in the first place, since the scan response itself carries no service UUID to
-//! pass the filter - so `PeripheralProperties::local_name` stays `None` forever on Windows even
-//! though the peripheral is broadcasting a name (confirmed present via nRF Connect/`bluetoothctl` on
-//! other platforms, and via the protocol's own `HANDSHAKE_RESPONSE.deviceName` once connected).
+//! (`winrtble::ble::watcher::BLEWatcher`, still used as-is for connect/disconnect - see the module
+//! doc above) hardcodes `SetAllowExtendedAdvertisements(true)` and `SetUseCodedPhy(true)` on its
+//! watcher with no way to disable either via `btleplug`'s public API. At least one real peripheral
+//! (a MeshCore radio, nRF52-based) has been observed to stop being reported by Windows to *any*
+//! watcher with `AllowExtendedAdvertisements` enabled, even though the exact same device shows up
+//! immediately on an otherwise-identical watcher with that one setting left at its default - this
+//! isn't a filtering issue (confirmed via an *unfiltered* scan on both watchers), it's specific to
+//! that one flag. Root cause presumably sits below WinRT (adapter/driver-level PHY scan-window
+//! trade-off), so there's nothing `btleplug` itself could sensibly work around either.
 //!
-//! Fixed the same way as the GATT lock issue above: go around `btleplug` with our own direct WinRT
-//! call. `ensure_name_watcher` starts a second, independent `BluetoothLEAdvertisementWatcher` with
-//! *no* service-UUID filter (so every nearby packet, primary and scan-response alike, reaches it),
-//! and caches whatever `LocalName` each address's packets carry into `NAME_CACHE`. `main.rs`'s
-//! `handle_central_event` (Windows-only) then looks up that cache to fill in `device_found`'s "name"
-//! field whenever `btleplug`'s own value is `None`. Started once, lazily, on the first `Scan` command
-//! and left running for the life of the process (unlike `btleplug`'s own watcher, not tied to
-//! Scan/StopScan - it's a passive, low-overhead listener with nothing to stop).
+//! Rather than trying to argue Windows out of dropping the advertisement, this runs a second,
+//! independent `BluetoothLEAdvertisementWatcher` alongside `btleplug`'s own - unfiltered, and
+//! without touching either problem setting - and forwards every peripheral *it* sees straight into
+//! the same `device_found` stream `handle_central_event` (Windows-only) populates from `btleplug`'s
+//! events, address and name taken directly from this watcher's own advertisement data (not routed
+//! through `btleplug`'s `Peripheral`/`PeripheralProperties` at all, since `btleplug` never learns
+//! this address exists in the first place). Devices both watchers see just get reported twice -
+//! already how repeated advertisements within one scan behave, and every existing caller already
+//! dedupes `device_found` by address. See `main.rs`'s `get_peripheral` for the matching other half
+//! of this: `Central::add_peripheral()` (btleplug 0.13+) lets `Connect` reach such a device by
+//! address even though `btleplug`'s own scan never discovered it, so discovery and connectability
+//! are fixed independently but end up covering the same gap.
+//!
+//! Tied to the same `Scan`/`StopScan` lifecycle as `btleplug`'s own watcher, not left running for
+//! the life of the process: an advertisement watcher left scanning in the background indefinitely
+//! would keep the radio in continuous active-scan mode even while a GATT connection is established
+//! and in use - a real source of connection-interval jitter on some BLE controllers - for a feature
+//! that's only useful during an actual scan window anyway.
 
 use std::collections::HashMap;
 use std::str::FromStr;
@@ -75,48 +84,39 @@ use windows::core::{GUID, Ref};
 
 use crate::hex_encode;
 
-/// Address (same `BDAddr` upper-hex-with-colons formatting `main.rs` uses) -> latest advertised
-/// `LocalName` seen by `NAME_WATCHER`, from *any* advertisement packet type. See the module doc
-/// comment above ("Scan-response local names") for why `btleplug`'s own scan can't see this itself.
-static NAME_CACHE: Mutex<Option<HashMap<String, String>>> = Mutex::new(None);
-
-/// Constructed once (with its `Received` handler registered) and then just Start()/Stop()ped from
-/// there on, exactly mirroring how `btleplug`'s own `BLEWatcher` (see `winrtble::ble::watcher`)
-/// wraps one persistent `BluetoothLEAdvertisementWatcher`. Deliberately tied to the same
-/// `Scan`/`StopScan` lifecycle as that watcher, *not* left running for the life of the process:
-/// unlike the GATT-lock bypass elsewhere in this file, an advertisement watcher left scanning in
-/// the background indefinitely would keep the radio in continuous active-scan mode even while a
-/// GATT connection is established and in use - a real source of connection-interval jitter on some
-/// BLE controllers - for a feature (scan-time name resolution) that's only useful during an actual
-/// scan window anyway.
-static NAME_WATCHER: Mutex<Option<BluetoothLEAdvertisementWatcher>> = Mutex::new(None);
+/// Constructed once and then just Start()/Stop()ped from there on, exactly mirroring how
+/// `btleplug`'s own `BLEWatcher` (see `winrtble::ble::watcher`) wraps one persistent
+/// `BluetoothLEAdvertisementWatcher`.
+static SCAN_WATCHER: Mutex<Option<BluetoothLEAdvertisementWatcher>> = Mutex::new(None);
 
 /// Starts (or resumes, if already constructed) the supplementary, filter-free advertisement
-/// watcher. Call once per `Scan` command; pair with `stop_name_watcher` on `StopScan`/timeout. See
-/// the module doc comment ("Scan-response local names") for why this exists.
-pub fn ensure_name_watcher() -> Result<(), String> {
-	let mut guard = NAME_WATCHER.lock().unwrap();
+/// watcher, forwarding every peripheral it sees as a `device_found` event on `tx`. Call once per
+/// `Scan` command; pair with `stop_scan_watcher` on `StopScan`/timeout. See the module doc comment
+/// ("Supplementary scan watcher") for why this exists.
+pub fn ensure_scan_watcher(tx: UnboundedSender<Value>) -> Result<(), String> {
+	let mut guard = SCAN_WATCHER.lock().unwrap();
 	if let Some(watcher) = guard.as_ref() {
 		return watcher.Start().map_err(|e| e.to_string());
 	}
 	let watcher = BluetoothLEAdvertisementWatcher::new().map_err(|e| e.to_string())?;
 	watcher.SetScanningMode(BluetoothLEScanningMode::Active).map_err(|e| e.to_string())?;
-	// No AdvertisementFilter set (unlike btleplug's own watcher) - deliberately unfiltered so
-	// scan-response packets (which never carry a service UUID to match a filter on) still arrive.
+	// Deliberately does NOT set AllowExtendedAdvertisements/UseCodedPhy (unlike btleplug's own
+	// watcher) and sets no AdvertisementFilter - see the module doc comment for why both matter.
 	// Explicit type on `handler` (not the closure params) - same pattern btleplug's own
 	// BLEWatcher::start uses, so inference doesn't depend on the later Received() call below.
 	let handler: TypedEventHandler<BluetoothLEAdvertisementWatcher, BluetoothLEAdvertisementReceivedEventArgs> = TypedEventHandler::new(
 		move |_sender, args: Ref<BluetoothLEAdvertisementReceivedEventArgs>| {
 			if let Ok(args) = args.ok() {
 				if let (Ok(raw_address), Ok(advertisement)) = (args.BluetoothAddress(), args.Advertisement()) {
-					if let Ok(name) = advertisement.LocalName() {
-						let name = name.to_string();
-						if !name.is_empty() {
-							if let Ok(address) = BDAddr::try_from(raw_address) {
-								let mut cache = NAME_CACHE.lock().unwrap();
-								cache.get_or_insert_with(HashMap::new).insert(address.to_string(), name);
-							}
-						}
+					if let Ok(address) = BDAddr::try_from(raw_address) {
+						let name = advertisement.LocalName().ok().map(|h| h.to_string()).filter(|s| !s.is_empty());
+						let rssi = args.RawSignalStrengthInDBm().ok();
+						let _ = tx.send(json!({
+							"type": "device_found",
+							"address": address.to_string(),
+							"name": name,
+							"rssi": rssi,
+						}));
 					}
 				}
 			}
@@ -129,20 +129,12 @@ pub fn ensure_name_watcher() -> Result<(), String> {
 	Ok(())
 }
 
-/// Stops the supplementary watcher (if it was ever started) without discarding the cached names
-/// already collected - those stay valid and are cheap to keep around. A no-op if it was never
-/// started. Call from `StopScan` and from the scan-timeout auto-stop path, mirroring
-/// `Adapter::stop_scan`.
-pub fn stop_name_watcher() {
-	if let Some(watcher) = NAME_WATCHER.lock().unwrap().as_ref() {
+/// Stops the supplementary watcher (if it was ever started). A no-op if it was never started. Call
+/// from `StopScan` and from the scan-timeout auto-stop path, mirroring `Adapter::stop_scan`.
+pub fn stop_scan_watcher() {
+	if let Some(watcher) = SCAN_WATCHER.lock().unwrap().as_ref() {
 		let _ = watcher.Stop();
 	}
-}
-
-/// Looks up the latest advertised name `NAME_WATCHER` has cached for `address` (same upper-hex
-/// formatting as `BDAddr::to_string()`), if any.
-pub fn cached_name(address: &str) -> Option<String> {
-	NAME_CACHE.lock().unwrap().as_ref().and_then(|m| m.get(address).cloned())
 }
 
 /// Holds the characteristic a live subscription's `ValueChanged` handler is registered on, and the

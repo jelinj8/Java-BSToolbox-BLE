@@ -10,7 +10,7 @@ name = "ble-bridge"
 path = "src/main.rs"
 
 [dependencies]
-btleplug = "0.11"
+btleplug = "0.13"
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "io-std", "io-util", "sync", "time"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
