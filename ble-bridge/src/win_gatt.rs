@@ -41,7 +41,10 @@
 //! immediately on an otherwise-identical watcher with that one setting left at its default - this
 //! isn't a filtering issue (confirmed via an *unfiltered* scan on both watchers), it's specific to
 //! that one flag. Root cause presumably sits below WinRT (adapter/driver-level PHY scan-window
-//! trade-off), so there's nothing `btleplug` itself could sensibly work around either.
+//! trade-off), so there's nothing `btleplug` itself could sensibly work around either - filed
+//! upstream as [btleplug#472](https://github.com/deviceplug/btleplug/issues/472); once that's
+//! fixed (or exposes a way to disable the flag), this workaround and `main.rs`'s matching
+//! `add_peripheral()` fallback in `get_peripheral` can likely both go.
 //!
 //! Rather than trying to argue Windows out of dropping the advertisement, this runs a second,
 //! independent `BluetoothLEAdvertisementWatcher` alongside `btleplug`'s own - unfiltered, and

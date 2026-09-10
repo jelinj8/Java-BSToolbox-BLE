@@ -339,10 +339,12 @@ async fn get_peripheral(state: &AppState, address: &str) -> Result<Peripheral, S
 	// hardcodes SetAllowExtendedAdvertisements/SetUseCodedPhy on for its scan watcher, and at
 	// least one real device (a MeshCore radio) has been observed to stop advertising visibly to
 	// Windows entirely once that's enabled, even though an unfiltered raw watcher without it
-	// sees the same device's advertisements fine. add_peripheral() (Central trait) sidesteps the
-	// problem by constructing a peripheral straight from the address - Windows implements this
-	// as of btleplug 0.13 (a device the OS already knows, bonded or not, doesn't need to have
-	// been seen advertising first); other backends currently return NotSupported, which just
+	// sees the same device's advertisements fine (filed upstream as btleplug#472 - see
+	// win_gatt.rs's module doc for the matching supplementary-watcher half of this workaround).
+	// add_peripheral() (Central trait) sidesteps the problem by constructing a peripheral
+	// straight from the address - Windows implements this as of btleplug 0.13 (a device the OS
+	// already knows, bonded or not, doesn't need to have been seen advertising first); other
+	// backends currently return NotSupported, which just
 	// falls through to the error below same as before.
 	if let Ok(addr) = address.parse::<BDAddr>() {
 		if let Ok(p) = state.adapter.add_peripheral(&PeripheralId::from(addr)).await {
