@@ -1,0 +1,12 @@
+/target
+/.classpath
+/.project
+/.settings
+/.factorypath
+/.claude
+/log
+ble-bridge/target
+ble-bridge/Cargo.lock
+/.flattened-pom.xml
+/dependency-reduced-pom.xml
+/bin
