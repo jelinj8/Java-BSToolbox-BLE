@@ -192,6 +192,21 @@ public class BleUtils {
 	}
 
 	/**
+	 * Finds BLE peripherals by fulltext search (address or name contains string).
+	 * Returns a list of all matching device results. Uses default timeout.
+	 *
+	 * @param adapter    The BLE adapter to use for scanning
+	 * @param searchTerm Search term to match against address or name (case
+	 *                   insensitive)
+	 * @return List of matching device results
+	 * @throws BleException if the scan fails
+	 */
+	public static List<BleDeviceResult> find(BleAdapter adapter, ScanFilter filter, String searchTerm)
+			throws BleException {
+		return find(adapter, filter, searchTerm, 10000); // Default 10 second timeout
+	}
+
+	/**
 	 * Finds BLE peripherals by fulltext search with multiple comma-separated terms.
 	 * Returns a list of all matching device results.
 	 *
