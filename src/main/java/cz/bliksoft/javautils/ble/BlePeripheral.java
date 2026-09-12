@@ -17,15 +17,22 @@ import com.fasterxml.jackson.databind.JsonNode;
  */
 public class BlePeripheral {
 
-	// Must exceed the sidecar's own worst-case time for the corresponding op, or the Java side
-	// times out before the sidecar - retrying to ride out transient OS-level BLE delays - gets a
-	// chance to finish. connect: ~21.5s retry budget (ble-bridge's retry_gatt) + a 2s post-connect
+	// Must exceed the sidecar's own worst-case time for the corresponding op, or
+	// the Java side
+	// times out before the sidecar - retrying to ride out transient OS-level BLE
+	// delays - gets a
+	// chance to finish. connect: ~21.5s retry budget (ble-bridge's retry_gatt) + a
+	// 2s post-connect
 	// settle delay = ~23.5s worst case.
 	private static final long CONNECT_TIMEOUT_MS = 30000;
-	// On Linux/macOS, subscribe/read/write/unsubscribe can each chain an implicit discover_services
-	// first (if characteristics aren't cached yet), whose own retry budget (~46s) stacks with the
-	// op's own (~21.5s): ~67.5s worst case. On Windows those same calls go through win_gatt.rs
-	// instead, which has no internal retry loop - this timeout is also the only bound on how long a
+	// On Linux/macOS, subscribe/read/write/unsubscribe can each chain an implicit
+	// discover_services
+	// first (if characteristics aren't cached yet), whose own retry budget (~46s)
+	// stacks with the
+	// op's own (~21.5s): ~67.5s worst case. On Windows those same calls go through
+	// win_gatt.rs
+	// instead, which has no internal retry loop - this timeout is also the only
+	// bound on how long a
 	// stuck WinRT call there is given before the caller gets a BleTimeoutException.
 	private static final long DEFAULT_TIMEOUT_MS = 75000;
 
@@ -110,8 +117,9 @@ public class BlePeripheral {
 	}
 
 	/**
-	 * Returns the currently negotiated ATT MTU in bytes (usable characteristic payload per write
-	 * is this minus 3 bytes of ATT overhead). Backend support varies by platform.
+	 * Returns the currently negotiated ATT MTU in bytes (usable characteristic
+	 * payload per write is this minus 3 bytes of ATT overhead). Backend support
+	 * varies by platform.
 	 */
 	public int getMtu() throws BleException {
 		JsonNode resp = adapter.sendRequest("get_mtu", fields("address", address), DEFAULT_TIMEOUT_MS);
@@ -119,10 +127,10 @@ public class BlePeripheral {
 	}
 
 	/**
-	 * Reads the current RSSI (signal strength) in dBm. Behavior varies by platform - see
-	 * {@code btleplug::api::Peripheral::read_rssi}'s own doc for the per-platform freshness
-	 * caveats (e.g. Windows returns the most recent value from advertisements, which needs
-	 * scanning to be active to stay fresh).
+	 * Reads the current RSSI (signal strength) in dBm. Behavior varies by platform
+	 * - see {@code btleplug::api::Peripheral::read_rssi}'s own doc for the
+	 * per-platform freshness caveats (e.g. Windows returns the most recent value
+	 * from advertisements, which needs scanning to be active to stay fresh).
 	 */
 	public int readRssi() throws BleException {
 		JsonNode resp = adapter.sendRequest("read_rssi", fields("address", address), DEFAULT_TIMEOUT_MS);
@@ -130,11 +138,13 @@ public class BlePeripheral {
 	}
 
 	/**
-	 * Returns the current BLE connection parameters as reported by the OS, or {@code null} if
-	 * this platform doesn't expose them (backend support varies). Throws if not connected.
+	 * Returns the current BLE connection parameters as reported by the OS, or
+	 * {@code null} if this platform doesn't expose them (backend support varies).
+	 * Throws if not connected.
 	 */
 	public ConnectionParameters getConnectionParameters() throws BleException {
-		JsonNode resp = adapter.sendRequest("get_connection_parameters", fields("address", address), DEFAULT_TIMEOUT_MS);
+		JsonNode resp = adapter.sendRequest("get_connection_parameters", fields("address", address),
+				DEFAULT_TIMEOUT_MS);
 		if (!resp.has("interval_us")) {
 			return null;
 		}
@@ -144,11 +154,13 @@ public class BlePeripheral {
 
 	/**
 	 * Requests a connection parameter update using a preset - e.g.
-	 * {@link ConnectionParameterPreset#THROUGHPUT_OPTIMIZED} before a bulk transfer, switched back
-	 * to {@link ConnectionParameterPreset#BALANCED} afterward. This is only a request: the remote
-	 * device may accept or reject it: read {@link #getConnectionParameters()} afterward to see
-	 * what actually took effect, rather than assuming the request was honored. Throws
-	 * {@link BleException} on backends that don't support this (currently: confirmed on Windows).
+	 * {@link ConnectionParameterPreset#THROUGHPUT_OPTIMIZED} before a bulk
+	 * transfer, switched back to {@link ConnectionParameterPreset#BALANCED}
+	 * afterward. This is only a request: the remote device may accept or reject it:
+	 * read {@link #getConnectionParameters()} afterward to see what actually took
+	 * effect, rather than assuming the request was honored. Throws
+	 * {@link BleException} on backends that don't support this (currently:
+	 * confirmed on Windows).
 	 */
 	public void requestConnectionParameters(ConnectionParameterPreset preset) throws BleException {
 		String presetStr;
