@@ -99,6 +99,32 @@
 				</configuration>
 			</plugin>
 
+			<!-- standalone runnable jar for the Main CLI, attached alongside the plain
+				library jar (which stays unshaded for Maven consumers) -->
+			<plugin>
+				<groupId>org.apache.maven.plugins</groupId>
+				<artifactId>maven-shade-plugin</artifactId>
+				<version>3.6.0</version>
+				<executions>
+					<execution>
+						<phase>package</phase>
+						<goals>
+							<goal>shade</goal>
+						</goals>
+						<configuration>
+							<shadedArtifactAttached>true</shadedArtifactAttached>
+							<shadedClassifierName>standalone</shadedClassifierName>
+							<transformers>
+								<transformer
+									implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+									<mainClass>cz.bliksoft.javautils.ble.Main</mainClass>
+								</transformer>
+							</transformers>
+						</configuration>
+					</execution>
+				</executions>
+			</plugin>
+
 			<!-- resolve ${revision} in published POM -->
 			<plugin>
 				<groupId>org.codehaus.mojo</groupId>

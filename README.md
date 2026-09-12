@@ -276,6 +276,37 @@ Copy the resulting binary into `src/main/resources/native/<os>-<arch>/ble-bridge
 `native/win-x86_64/ble-bridge.exe`, `native/linux-x86_64/ble-bridge`) before building the Java
 jar. `NativeBinaryLoader` resolves that path from the JVM's `os.name`/`os.arch` at runtime.
 
+## Command-line tool
+
+A `Main` class is bundled for ad-hoc device discovery without writing any code. Build it into a
+standalone runnable jar (bundles `jackson-databind`; the plain library jar published to Maven is
+unaffected):
+
+```bash
+mvn package
+```
+
+This produces `target/common-java-utils-ble-<version>-standalone.jar` alongside the regular
+library jar. Run it (still needs the native `ble-bridge` binary staged as described above):
+
+```bash
+# Scan for all nearby devices (10s)
+java -jar target/common-java-utils-ble-<version>-standalone.jar
+
+# Scan for devices matching a substring (address or name, 10s) - see BleUtils.find()
+java -jar target/common-java-utils-ble-<version>-standalone.jar MyDevice
+```
+
+Each discovered device is printed as one tab-separated line, `ADDRESS\tNAME\tRSSI` (`-` in place
+of a missing name or RSSI):
+
+```
+AA:BB:CC:DD:EE:FF	MyDevice	-62
+11:22:33:44:55:66	-	-70
+```
+
+Errors (e.g. Bluetooth powered off) are printed to stderr and exit with status 1.
+
 ## Status
 
 Verified end-to-end on Windows and Linux against real peripherals: scan, connect, discover,
