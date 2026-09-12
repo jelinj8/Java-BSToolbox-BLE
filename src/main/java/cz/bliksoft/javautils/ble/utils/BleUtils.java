@@ -47,7 +47,6 @@ public class BleUtils {
 
 			if (match != null
 					&& (normalizedMatch.equals(normalizedAddress) || normalizedMatch.equals(normalizedName))) {
-				System.out.println("Exact match found");
 				try {
 					adapter.stopScan();
 				} catch (BleException e) {
