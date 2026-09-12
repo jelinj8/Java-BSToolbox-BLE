@@ -54,6 +54,7 @@ public class BleAdapter implements AutoCloseable {
 	private final Map<String, CompletableFuture<JsonNode>> pending = new ConcurrentHashMap<>();
 	private final Map<String, BlePeripheral> peripherals = new ConcurrentHashMap<>();
 	private volatile BleScanListener scanListener;
+	private volatile CompletableFuture<JsonNode> scanFuture = null;
 	private volatile boolean alive = true;
 	private volatile boolean closing = false;
 
@@ -94,14 +95,57 @@ public class BleAdapter implements AutoCloseable {
 			cmd.put("filter_service_uuid", filter.getServiceUuid());
 		}
 		cmd.put("timeout_ms", timeoutMs);
-		sendRequest(cmd, timeoutMs + 5000);
+		CompletableFuture<JsonNode> future = sendRequestAsync(cmd, timeoutMs + 5000);
+		// Store the scan future so stopScan() can cancel it early
+		scanFuture = future;
+		// Clear scanFuture when done (normal timeout or exception)
+		future.whenComplete((r, e) -> scanFuture = null);
+		// Wait for the future, but ignore the "scan stopped early" exception
+		try {
+			future.get(timeoutMs + 5000, TimeUnit.MILLISECONDS);
+		} catch (ExecutionException e) {
+			// Check if this is a "scan stopped early" exception (which is expected)
+			Throwable cause = e.getCause();
+			if (!(cause instanceof BleException && cause.getMessage().contains("scan stopped early"))) {
+				// Re-throw if it's a different exception
+				if (cause instanceof BleException) {
+					throw (BleException) cause;
+				}
+				throw new BleSidecarException("sidecar request failed", cause);
+			}
+			// If it's "scan stopped early", we treat it as success - scan completed successfully
+		} catch (TimeoutException e) {
+			throw new BleTimeoutException("timed out waiting for response to 'scan'");
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new BleSidecarException("interrupted waiting for sidecar response", e);
+		}
 	}
 
 	public void stopScan() throws BleException {
 		ObjectNode cmd = mapper.createObjectNode();
 		cmd.put("cmd", "stop_scan");
-		sendRequest(cmd, DEFAULT_TIMEOUT_MS);
+		// Send stop_scan but don't wait for response - we just need to stop the scan
+		// in the sidecar and complete the scan future. The sidecar will eventually
+		// respond, but we don't need to block on it.
+		sendRequestAsync(cmd, DEFAULT_TIMEOUT_MS);
+		// Clear the scan listener to stop further device_found events
 		this.scanListener = null;
+		// Cancel the pending scan future so scan() returns early
+		CompletableFuture<JsonNode> future = scanFuture;
+		if (future != null) {
+			// Remove the scan command from pending so handleResponse doesn't try to
+			// complete it again after we've already completed it exceptionally
+			Iterator<Map.Entry<String, CompletableFuture<JsonNode>>> it = pending.entrySet().iterator();
+			while (it.hasNext()) {
+				Map.Entry<String, CompletableFuture<JsonNode>> entry = it.next();
+				if (entry.getValue() == future) {
+					it.remove();
+					break;
+				}
+			}
+			future.completeExceptionally(new BleException("scan stopped early by stopScan()"));
+		}
 	}
 
 	/**
@@ -157,7 +201,58 @@ public class BleAdapter implements AutoCloseable {
 	// --- internals used by BlePeripheral
 	// -----------------------------------------------------
 
-	JsonNode sendRequest(String cmd, Map<String, Object> fields, long timeoutMs) throws BleException {
+	/**
+	 * Sends a request and returns a CompletableFuture for async handling.
+	 * The caller is responsible for handling the future and any exceptions.
+	 */
+	CompletableFuture<JsonNode> sendRequestAsync(ObjectNode node, long timeoutMs) throws BleException {
+		if (!isAlive()) {
+			throw new BleSidecarException("ble-bridge sidecar is not running");
+		}
+		String id = String.valueOf(idGenerator.incrementAndGet());
+		node.put("id", id);
+		CompletableFuture<JsonNode> future = new CompletableFuture<>();
+		pending.put(id, future);
+		try {
+			writeLine(node);
+		} catch (IOException e) {
+			pending.remove(id);
+			throw new BleSidecarException("failed to write to sidecar stdin", e);
+		}
+		// Set a timeout on the future
+		Thread timeoutThread = new Thread(() -> {
+			try {
+				Thread.sleep(timeoutMs);
+				future.completeExceptionally(new BleTimeoutException(
+						"timed out waiting for response to '" + node.get("cmd").asText() + "'"));
+			} catch (InterruptedException e) {
+				Thread.currentThread().interrupt();
+			}
+		});
+		timeoutThread.setDaemon(true);
+		timeoutThread.start();
+		return future;
+	}
+
+	private JsonNode sendRequest(ObjectNode node, long timeoutMs) throws BleException {
+		CompletableFuture<JsonNode> future = sendRequestAsync(node, timeoutMs);
+		try {
+			return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+		} catch (TimeoutException e) {
+			throw new BleTimeoutException("timed out waiting for response to '" + node.get("cmd").asText() + "'");
+		} catch (ExecutionException e) {
+			Throwable cause = e.getCause();
+			if (cause instanceof BleException) {
+				throw (BleException) cause;
+			}
+			throw new BleSidecarException("sidecar request failed", cause);
+		} catch (InterruptedException e) {
+			Thread.currentThread().interrupt();
+			throw new BleSidecarException("interrupted waiting for sidecar response", e);
+		}
+	}
+
+	public JsonNode sendRequest(String cmd, Map<String, Object> fields, long timeoutMs) throws BleException {
 		ObjectNode node = mapper.createObjectNode();
 		node.put("cmd", cmd);
 		if (fields != null) {
@@ -175,35 +270,6 @@ public class BleAdapter implements AutoCloseable {
 			}
 		}
 		return sendRequest(node, timeoutMs);
-	}
-
-	private JsonNode sendRequest(ObjectNode node, long timeoutMs) throws BleException {
-		if (!isAlive()) {
-			throw new BleSidecarException("ble-bridge sidecar is not running");
-		}
-		String id = String.valueOf(idGenerator.incrementAndGet());
-		node.put("id", id);
-		CompletableFuture<JsonNode> future = new CompletableFuture<>();
-		pending.put(id, future);
-		try {
-			writeLine(node);
-			return future.get(timeoutMs, TimeUnit.MILLISECONDS);
-		} catch (TimeoutException e) {
-			pending.remove(id);
-			throw new BleTimeoutException("timed out waiting for response to '" + node.get("cmd").asText() + "'");
-		} catch (ExecutionException e) {
-			Throwable cause = e.getCause();
-			if (cause instanceof BleException) {
-				throw (BleException) cause;
-			}
-			throw new BleSidecarException("sidecar request failed", cause);
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
-			throw new BleSidecarException("interrupted waiting for sidecar response", e);
-		} catch (IOException e) {
-			pending.remove(id);
-			throw new BleSidecarException("failed to write to sidecar stdin", e);
-		}
 	}
 
 	private void writeLine(ObjectNode node) throws IOException {
