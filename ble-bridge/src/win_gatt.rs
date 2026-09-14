@@ -30,6 +30,13 @@
 //! the life of the subscription (unlike a one-shot read/write) - `SUBSCRIPTIONS` keeps that alive;
 //! the device/service it depends on are kept alive independently by `SERVICES`.
 //!
+//! `resolve_service`'s UUID-scoped `GetGattServicesForUuidAsync` also depends on Windows having
+//! already cached the device's GATT database via a prior broad, unscoped `GetGattServicesAsync` -
+//! `ensure_services_discovered` runs that once per address (cached in `DISCOVERED`) before the
+//! first scoped query, so `read`/`write`/`subscribe` don't require a caller to have explicitly
+//! called `discover_services` first. See that function's own doc for the real-hardware symptom
+//! this fixes.
+//!
 //! ## Supplementary scan watcher (`ensure_scan_watcher`/`stop_scan_watcher`)
 //!
 //! A second, unrelated Windows-only scan gap lives here too: `btleplug`'s own Windows scan path
@@ -262,6 +269,37 @@ async fn ensure_session(address: &str) -> Result<(), String> {
 	Ok(())
 }
 
+/// Addresses for which a broad, unscoped `GetGattServicesAsync()` has already run once - see
+/// `ensure_services_discovered`. Kept for the life of the process, matching `SERVICES`/`SESSIONS`.
+static DISCOVERED: Mutex<Option<HashMap<String, ()>>> = Mutex::new(None);
+
+/// Forces Windows to enumerate and cache `device`'s full GATT database at least once, if it
+/// hasn't already happened for this address (via this call or a caller's own `discover_services`).
+///
+/// Without this, the very first UUID-scoped `GetGattServicesForUuidAsync()` call right after
+/// connecting (in `find_service` below) can fail even though the peripheral is genuinely
+/// connected and the service really exists - confirmed on real hardware: a MeshCore radio's first
+/// post-connect `subscribe()` reliably failed a few times in a row, until a caller happened to
+/// have already called `discover_services()` (a broad, unscoped query) first. Scoped queries
+/// evidently depend on Windows having already built its internal GATT cache via a broad one; a
+/// second `BluetoothLEDevice` proxy for the same address (this module never reuses one, see the
+/// module doc) doesn't skip that requirement.
+async fn ensure_services_discovered(device: &BluetoothLEDevice, address: &str) -> Result<(), String> {
+	{
+		let guard = DISCOVERED.lock().unwrap();
+		if guard.as_ref().map_or(false, |m| m.contains_key(address)) {
+			return Ok(());
+		}
+	}
+	let result = device.GetGattServicesAsync().map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())?;
+	let status = result.Status().map_err(|e| e.to_string())?;
+	if status != GattCommunicationStatus::Success {
+		return Err(format!("GetGattServicesAsync (warm-up) failed: {:?}", status));
+	}
+	DISCOVERED.lock().unwrap().get_or_insert_with(HashMap::new).insert(address.to_string(), ());
+	Ok(())
+}
+
 async fn resolve_service(address: &str, service_uuid: &str) -> Result<(BluetoothLEDevice, GattDeviceService), String> {
 	ensure_session(address).await?;
 	let key = service_key(address, service_uuid);
@@ -273,6 +311,7 @@ async fn resolve_service(address: &str, service_uuid: &str) -> Result<(Bluetooth
 		// guard drops here, before the awaits below - a std MutexGuard must not be held across one.
 	}
 	let device = open_device(address).await?;
+	ensure_services_discovered(&device, address).await?;
 	let service = find_service(&device, service_uuid).await?;
 	let mut guard = SERVICES.lock().unwrap();
 	let map = guard.get_or_insert_with(HashMap::new);
@@ -412,6 +451,7 @@ pub async fn discover_services(address: &str) -> Result<Vec<Value>, String> {
 			"characteristics": characteristics,
 		}));
 	}
+	DISCOVERED.lock().unwrap().get_or_insert_with(HashMap::new).insert(address.to_string(), ());
 	Ok(result)
 }
 

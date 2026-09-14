@@ -16,8 +16,8 @@ prompt, PIN supplied automatically - is planned but not implemented, see "Planne
 Two modules:
 - `ble-bridge/` — the Rust sidecar (Cargo project, `cargo build --release`, `btleplug` 0.13).
   `main.rs` holds the wire protocol and the `btleplug`-backed implementation used on every
-  platform; `win_gatt.rs` is Windows-only and works around two separate, unrelated `btleplug`
-  Windows-backend gaps:
+  platform; `win_gatt.rs` is Windows-only and works around three separate, unrelated `btleplug`/
+  WinRT gaps:
   - A direct-WinRT GATT path (discover/read/write/subscribe/unsubscribe only — connect/disconnect
     stay on `btleplug`) that works around a bug where an abandoned WinRT operation can permanently
     block every later GATT call on the same device object.
@@ -30,8 +30,16 @@ Two modules:
     `main.rs`'s `get_peripheral` pairs this with a `Central::add_peripheral()` fallback (new in
     0.13, Windows-supported) so `Connect` can still reach such a peripheral by address even though
     `btleplug`'s own scan never discovered it.
+  - `resolve_service`'s UUID-scoped `GetGattServicesForUuidAsync` needs a prior broad, unscoped
+    `GetGattServicesAsync` to have completed at least once per connection before it reliably
+    succeeds — without it, the first `read`/`write`/`subscribe` right after `connect()` can fail
+    even though the peripheral is genuinely connected (confirmed on real hardware: `subscribe()`
+    on a MeshCore radio reliably failed a few times in a row immediately post-connect).
+    `ensure_services_discovered` runs that broad discovery once per address (cached in
+    `DISCOVERED`) before the first scoped query, so callers don't need to call
+    `discoverServices()` themselves for this to work.
 
-  See `win_gatt.rs`'s module doc comment and README.md before touching either path.
+  See `win_gatt.rs`'s module doc comment and README.md before touching any of these paths.
 - `src/main/java/cz/bliksoft/javautils/ble/` — the Java client library.
 
 ## Build / test commands

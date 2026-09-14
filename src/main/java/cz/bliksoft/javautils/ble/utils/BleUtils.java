@@ -22,18 +22,22 @@ public class BleUtils {
 	 * {@link BleAdapter#scan(ScanFilter, long, BleScanListener)} but deduplicates
 	 * results based on device address, keeping only the result with a non-null name
 	 * when duplicates exist.
+	 * <p>
+	 * Address/name matching (exact or substring) is expressed on {@code filter}
+	 * itself - see {@link ScanFilter#withAddress}, {@link ScanFilter#withName},
+	 * {@link ScanFilter#withMatchingAddress}, {@link ScanFilter#withMatchingName}.
+	 * {@link BleAdapter} enforces that matching (and any exact-match auto-stop)
+	 * before this method ever sees a {@code device_found} event, so this method
+	 * itself only needs to deduplicate what it's given.
 	 *
 	 * @param adapter   The BLE adapter to use for scanning
 	 * @param filter    Optional scan filter to apply
 	 * @param timeoutMs Timeout for the scan operation in milliseconds
-	 * @param match     String to be matched - if set and found in scan, the scan
-	 *                  will be stopped and a single device returned (matching
-	 *                  address or name, case insensitive)
 	 * @return List of unique device results found during scanning, with preference
 	 *         given to those having device names
 	 * @throws BleException if the scan fails
 	 */
-	public static List<BleDeviceResult> scan(BleAdapter adapter, ScanFilter filter, long timeoutMs, String match)
+	public static List<BleDeviceResult> scan(BleAdapter adapter, ScanFilter filter, long timeoutMs)
 			throws BleException {
 		// Map to store devices by address, keeping track of which ones have names
 		Map<String, BleDeviceResult> deviceMap = new HashMap<>();
@@ -42,18 +46,6 @@ public class BleUtils {
 		BleScanListener scanListener = (address, name, rssi) -> {
 			// Normalize the address to uppercase for consistent comparison
 			String normalizedAddress = address.toUpperCase();
-			String normalizedName = (name != null ? name.toUpperCase().trim() : null);
-			String normalizedMatch = (match != null ? match.toUpperCase().trim() : null);
-
-			if (match != null
-					&& (normalizedMatch.equals(normalizedAddress) || normalizedMatch.equals(normalizedName))) {
-				try {
-					adapter.stopScan();
-				} catch (BleException e) {
-				}
-				deviceMap.clear();
-				deviceMap.put(normalizedAddress, new BleDeviceResult(address, name, rssi));
-			}
 
 			// Update the device result, preferring non-null names
 			deviceMap.compute(normalizedAddress, (addr, existingResult) -> {
@@ -88,7 +80,7 @@ public class BleUtils {
 	 * @throws BleException if the scan fails
 	 */
 	public static List<BleDeviceResult> scan(BleAdapter adapter, ScanFilter filter) throws BleException {
-		return scan(adapter, filter, 10000, null); // Default 10 second timeout
+		return scan(adapter, filter, 10000); // Default 10 second timeout
 	}
 
 	/**
@@ -102,7 +94,7 @@ public class BleUtils {
 	 * @throws BleException if the scan fails
 	 */
 	public static List<BleDeviceResult> scan(BleAdapter adapter, long timeoutMs) throws BleException {
-		return scan(adapter, null, timeoutMs, null);
+		return scan(adapter, null, timeoutMs);
 	}
 
 	/**
@@ -116,7 +108,7 @@ public class BleUtils {
 	 * @throws BleException if the scan fails
 	 */
 	public static List<BleDeviceResult> scan(BleAdapter adapter) throws BleException {
-		return scan(adapter, null, 10000, null); // Default 10 second timeout
+		return scan(adapter, null, 10000); // Default 10 second timeout
 	}
 
 	/**
@@ -141,6 +133,19 @@ public class BleUtils {
 					+ results.size() + " matches)");
 		}
 		return results.get(0);
+	}
+
+	/**
+	 * Builds a filter carrying {@code filter}'s {@code serviceUuid} (if any) plus a
+	 * substring address/name match on {@code searchTerm} - never mutates the
+	 * caller's {@code filter} instance.
+	 */
+	private static ScanFilter withSearchTerm(ScanFilter filter, String searchTerm) {
+		ScanFilter result = new ScanFilter();
+		if (filter != null) {
+			result.withServiceUuid(filter.getServiceUuid());
+		}
+		return result.withMatchingAddress(searchTerm).withMatchingName(searchTerm);
 	}
 
 	/**
@@ -172,23 +177,7 @@ public class BleUtils {
 	 */
 	public static List<BleDeviceResult> find(BleAdapter adapter, ScanFilter filter, String searchTerm, long timeoutMs)
 			throws BleException {
-		// Normalize search term to lowercase for case-insensitive comparison
-		String normalizedSearchTerm = searchTerm.toLowerCase().trim();
-		List<BleDeviceResult> devices = BleUtils.scan(adapter, filter, timeoutMs, null);
-
-		// Filter results based on search term
-		List<BleDeviceResult> result = new ArrayList<>();
-		for (BleDeviceResult deviceResult : devices) {
-			String normalizedAddress = deviceResult.address.toLowerCase();
-			String normalizedName = deviceResult.name != null ? deviceResult.name.toLowerCase() : "";
-
-			// Check if search term matches address or name
-			if (normalizedAddress.contains(normalizedSearchTerm) || normalizedName.contains(normalizedSearchTerm)) {
-				result.add(deviceResult);
-			}
-		}
-
-		return result;
+		return scan(adapter, withSearchTerm(filter, searchTerm), timeoutMs);
 	}
 
 	/**
@@ -224,7 +213,7 @@ public class BleUtils {
 		for (String term : searchTerms) {
 			normalizedSearchTerms.add(term.toLowerCase().trim());
 		}
-		List<BleDeviceResult> devices = BleUtils.scan(adapter, filter, timeoutMs, null);
+		List<BleDeviceResult> devices = BleUtils.scan(adapter, filter, timeoutMs);
 
 		// Filter results based on search terms
 		List<BleDeviceResult> result = new ArrayList<>();

@@ -50,6 +50,16 @@ pair — cached and reused for every characteristic on that service, since two i
 to the same service open at once make Windows reject GATT access outright — and looking up each
 characteristic by UUID on demand rather than enumerating the whole GATT profile.
 
+`win_gatt.rs`'s per-characteristic lookups are UUID-scoped (`GetGattServicesForUuidAsync`) rather
+than enumerating the whole GATT profile, but Windows apparently needs a broad, unscoped
+`GetGattServicesAsync()` to have completed at least once per connection before a scoped query
+reliably succeeds - without it, the first `read`/`write`/`subscribe` right after `connect()` can
+fail even though the peripheral is genuinely connected and the service really exists (confirmed on
+real hardware: `subscribe()` on a MeshCore radio reliably failed a few times in a row immediately
+after connecting). `win_gatt.rs` runs that broad discovery once per address automatically (cached,
+so it only happens once) before its first scoped query, so callers don't need to call
+`discoverServices()` themselves first for this to work correctly.
+
 Scan on Windows is `btleplug`'s own watcher *plus* a second, independent one `win_gatt.rs` runs
 alongside it: `btleplug`'s Windows watcher hardcodes `SetAllowExtendedAdvertisements(true)` and
 `SetUseCodedPhy(true)`, with no way to disable either via its public API, and at least one real
@@ -141,13 +151,13 @@ BlePeripheral peripheral = result.getPeripheral(adapter);
 peripheral.connect();
 ```
 
-For exact match with auto-stop, use the `match` parameter in `scan()` directly:
+For exact match with auto-stop, use `ScanFilter.withAddress()` / `.withName()`:
 
 ```java
-// Scan stops immediately when exact match found (case-insensitive, full string)
-List<BleDeviceResult> results = BleUtils.scan(adapter, null, 10000, "AA:BB:CC:DD:EE:FF");
+// Scan stops immediately when an exact address/name match is found (case-insensitive)
+List<BleDeviceResult> results = BleUtils.scan(adapter, new ScanFilter().withAddress("AA:BB:CC:DD:EE:FF"), 10000);
 // or
-List<BleDeviceResult> results = BleUtils.scan(adapter, null, 10000, "MyDevice");
+List<BleDeviceResult> results = BleUtils.scan(adapter, new ScanFilter().withName("MyDevice"), 10000);
 ```
 
 **Find by partial match:** For partial address/name matches, use `BleUtils.find()` - this scans for the full duration and filters results:
@@ -166,7 +176,7 @@ The `cz.bliksoft.javautils.ble.utils.BleUtils` class provides common BLE operati
 | Method | Description |
 |--------|-------------|
 | `scan(adapter)` / `scan(adapter, filter)` / `scan(adapter, timeoutMs)` | Scan for peripherals, return unique devices (deduplicates by address, prefers non-null names) |
-| `scan(adapter, filter, timeoutMs, match)` | Scan with optional exact match - if `match` is provided, scan stops immediately when a device's address or name exactly matches (case-insensitive) |
+| `scan(adapter, filter, timeoutMs)` | Scan for peripherals matching `filter`; if `filter` has an exact `withAddress`/`withName` criterion, the scan stops immediately once it's found |
 | `find(adapter, filter, searchTerm)` / `find(adapter, filter, searchTerms)` | Search for devices by address or name (case-insensitive substring match); scans until timeout |
 | `findOne(adapter, filter, searchTerm)` | Get a single device matching by substring; throws if 0 or multiple matches; scans until timeout |
 | `BleDeviceResult.getPeripheral(adapter)` | Get a `BlePeripheral` handle from a scan result |
@@ -187,12 +197,25 @@ BlePeripheral peripheral = result.getPeripheral(adapter);
 
 ### Scan filter
 
-Use `ScanFilter` to limit scan results to a specific service UUID:
+`ScanFilter` narrows scan results by service UUID (filtered natively by the sidecar) and/or
+by address/name (filtered by the adapter itself, evaluated per advertisement/scan-response
+event so a name that only arrives via a scan response is still matched correctly):
 
 ```java
 ScanFilter filter = new ScanFilter().withServiceUuid("12345678-1234-5678-1234-567890123456");
 adapter.scan(filter, 5000, listener);
+
+// Exact match (case-insensitive) - auto-stops the scan as soon as it's found
+ScanFilter exact = new ScanFilter().withAddress("AA:BB:CC:DD:EE:FF");
+// or: new ScanFilter().withName("MyDevice");
+
+// Substring match (case-insensitive) - collects every match over the full timeout
+ScanFilter partial = new ScanFilter().withMatchingAddress("AA:BB:CC");
+// or: new ScanFilter().withMatchingName("MyDevice");
 ```
+
+Combining multiple address/name criteria on one filter matches a device if it satisfies
+*any* of them (logical OR); there's no way to require several to hold at once.
 
 ### Complete examples
 
@@ -230,7 +253,7 @@ try (BleAdapter adapter = new BleAdapter()) {
 
 // Or for exact match with auto-stop:
 try (BleAdapter adapter = new BleAdapter()) {
-    List<BleDeviceResult> results = BleUtils.scan(adapter, null, 10000, "AA:BB:CC:DD:EE:FF");
+    List<BleDeviceResult> results = BleUtils.scan(adapter, new ScanFilter().withAddress("AA:BB:CC:DD:EE:FF"), 10000);
     if (!results.isEmpty()) {
         BlePeripheral peripheral = results.get(0).getPeripheral(adapter);
         peripheral.connect();
@@ -314,7 +337,10 @@ subscribe, read and write all work, including reconnect after a manual disconnec
 against two independent devices with different GATT profiles - a custom-service e-paper display
 (CrowPanel) and a Nordic UART Service-based MeshCore radio - the latter specifically to shake out
 the Windows scan/discovery gaps described above (the radio was invisible to scan and
-unconnectable before the `win_gatt.rs` supplementary watcher and `add_peripheral()` fallback).
+unconnectable before the `win_gatt.rs` supplementary watcher and `add_peripheral()` fallback), and
+a Windows-only post-connect `subscribe()` flakiness (fixed by the automatic broad-discovery warm-up
+described above) that only showed up once reconnects became fast enough to no longer accidentally
+give the OS's GATT cache time to settle on its own.
 macOS has no automated or manual verification yet — the sidecar builds for it, but nothing has
 exercised it against real hardware.
 

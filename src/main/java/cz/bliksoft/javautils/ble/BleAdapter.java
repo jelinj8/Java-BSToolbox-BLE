@@ -56,6 +56,7 @@ public class BleAdapter implements AutoCloseable {
 	private final Map<String, CompletableFuture<JsonNode>> pending = new ConcurrentHashMap<>();
 	private final Map<String, BlePeripheral> peripherals = new ConcurrentHashMap<>();
 	private volatile BleScanListener scanListener;
+	private volatile ScanFilter scanFilter;
 	private volatile CompletableFuture<JsonNode> scanFuture = null;
 	private volatile boolean alive = true;
 	private volatile boolean closing = false;
@@ -91,6 +92,7 @@ public class BleAdapter implements AutoCloseable {
 	 */
 	public void scan(ScanFilter filter, long timeoutMs, BleScanListener listener) throws BleException {
 		this.scanListener = listener;
+		this.scanFilter = filter;
 		ObjectNode cmd = mapper.createObjectNode();
 		cmd.put("cmd", "scan");
 		if (filter != null && filter.getServiceUuid() != null) {
@@ -132,8 +134,9 @@ public class BleAdapter implements AutoCloseable {
 		// in the sidecar and complete the scan future. The sidecar will eventually
 		// respond, but we don't need to block on it.
 		sendRequestAsync(cmd, DEFAULT_TIMEOUT_MS);
-		// Clear the scan listener to stop further device_found events
+		// Clear the scan listener/filter to stop further device_found events
 		this.scanListener = null;
+		this.scanFilter = null;
 		// Cancel the pending scan future so scan() returns early
 		CompletableFuture<JsonNode> future = scanFuture;
 		if (future != null) {
@@ -355,8 +358,20 @@ public class BleAdapter implements AutoCloseable {
 		case "device_found":
 			BleScanListener l = scanListener;
 			if (l != null) {
-				l.onDeviceFound(node.path("address").asText(null), node.path("name").asText(null),
-						node.hasNonNull("rssi") ? node.path("rssi").asInt() : null);
+				String address = node.path("address").asText(null);
+				String name = node.path("name").asText(null);
+				Integer rssi = node.hasNonNull("rssi") ? node.path("rssi").asInt() : null;
+				ScanFilter f = scanFilter;
+				if (f == null || f.matches(address, name)) {
+					l.onDeviceFound(address, name, rssi);
+					if (f != null && f.isExactMatch(address, name)) {
+						try {
+							stopScan();
+						} catch (BleException e) {
+							LOG.log(Level.FINE, "stopScan() after exact ScanFilter match failed", e);
+						}
+					}
+				}
 			}
 			break;
 		case "notification":
