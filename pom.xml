@@ -114,6 +114,10 @@
 						<configuration>
 							<shadedArtifactAttached>true</shadedArtifactAttached>
 							<shadedClassifierName>standalone</shadedClassifierName>
+							<!-- shade's reduced-pom generation runs after flatten-maven-plugin and would
+								overwrite the deployed POM's <dependencies> with an empty list (since our
+								one dependency is fully shaded into the standalone jar) - see MSHADE-323 -->
+							<createDependencyReducedPom>false</createDependencyReducedPom>
 							<transformers>
 								<transformer
 									implementation="org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
