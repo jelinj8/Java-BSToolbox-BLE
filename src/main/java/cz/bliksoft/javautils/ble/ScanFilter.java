@@ -25,6 +25,25 @@ import java.util.Locale;
  * after delivering that event. Substring criteria never trigger this auto-stop,
  * since callers relying on them (e.g. a fulltext device search) expect every
  * match found during the full scan window.
+ * <p>
+ * {@link #requireName()} narrows that auto-stop further: even an address/name
+ * match doesn't stop the scan unless the advertised name is <em>also</em>
+ * populated on that same event. The device is still reported to the caller's
+ * listener as soon as its address matches (so a caller polling results early
+ * already sees it, name or not - see
+ * {@link cz.bliksoft.javautils.ble.utils.BleUtils#scan}'s own dedup, which
+ * already prefers a later-arriving named result over an earlier nameless one
+ * for the same address) - only the auto-stop itself waits for the name. If the
+ * name never arrives, the scan simply runs to its full {@code timeoutMs}
+ * instead of stopping early, and whatever was last seen (nameless, if that's
+ * all there ever was) is what a caller gets. Exists because some devices split
+ * their advertising data across two packets - a primary advertisement (address
+ * only) and a later scan-response (carrying the name) - and a plain
+ * exact-address filter's normal early-stop can otherwise reliably grab only the
+ * first, nameless one every time, no matter how many times the scan is retried
+ * (confirmed on real hardware, a Niimbot M2: retrying a plain
+ * {@link #withAddress} scan never once got the name, since each independent
+ * retry stopped at the same first packet again).
  */
 public class ScanFilter {
 
@@ -33,6 +52,7 @@ public class ScanFilter {
 	private String exactName;
 	private String containsAddress;
 	private String containsName;
+	private boolean requireName;
 
 	public String getServiceUuid() {
 		return serviceUuid;
@@ -83,6 +103,22 @@ public class ScanFilter {
 		return this;
 	}
 
+	public boolean isNameRequired() {
+		return requireName;
+	}
+
+	/**
+	 * See this class's own javadoc for the full reasoning - narrows
+	 * {@link #isExactMatch}'s auto-stop trigger so an exact address/name match
+	 * alone doesn't stop the scan unless the advertised name is also populated on
+	 * that event. Meaningless without an exact criterion
+	 * ({@link #withAddress}/{@link #withName}) also configured.
+	 */
+	public ScanFilter requireName() {
+		this.requireName = true;
+		return this;
+	}
+
 	/**
 	 * True if no address/name criteria are configured (a plain discovery filter,
 	 * e.g. {@code serviceUuid}-only or entirely empty) - such a filter matches
@@ -122,9 +158,14 @@ public class ScanFilter {
 	 * True if {@code address}/{@code name} satisfy an <em>exact</em> criterion
 	 * ({@link #withAddress} or {@link #withName}) - used by {@link BleAdapter} to
 	 * auto-stop a scan as soon as the specific device it was looking for is found.
-	 * Never true for substring criteria alone.
+	 * Never true for substring criteria alone. False regardless of an
+	 * otherwise-exact match when {@link #requireName()} is set and {@code name} is
+	 * blank - see this class's own javadoc.
 	 */
 	public boolean isExactMatch(String address, String name) {
+		if (requireName && (name == null || name.isBlank())) {
+			return false;
+		}
 		if (exactAddress != null && normalize(exactAddress).equals(normalize(address))) {
 			return true;
 		}

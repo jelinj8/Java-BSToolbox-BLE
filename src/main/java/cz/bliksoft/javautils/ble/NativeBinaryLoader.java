@@ -12,14 +12,16 @@ import java.util.Locale;
  * classpath resource (built separately per OS/arch by the {@code ble-bridge}
  * Rust crate) to a temp file so it can be launched with {@link ProcessBuilder}.
  * No BLE library or runtime needs to be pre-installed on the target machine -
- * the binary is fully self-contained.
+ * the binary is fully self-contained. Public (rather than package-private) so
+ * {@code cz.bliksoft.javautils.ble.remote.RemoteAdapterClient} can spawn its
+ * own local sidecar the same way {@link BleAdapter}'s no-arg constructor does.
  */
-final class NativeBinaryLoader {
+public final class NativeBinaryLoader {
 
 	private NativeBinaryLoader() {
 	}
 
-	static File extract() throws BleSidecarException {
+	public static File extract() throws BleSidecarException {
 		String platformDir = platformDir();
 		boolean windows = platformDir.startsWith("win-");
 		String resourceName = "ble-bridge" + (windows ? ".exe" : "");

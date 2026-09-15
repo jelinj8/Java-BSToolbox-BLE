@@ -92,6 +92,9 @@ that file.
 
 ## Usage
 
+Requires Java 11 or later (needed for the `--remote` CLI client's WebSocket support - see "Remote
+BLE adapters" below).
+
 ```java
 try (BleAdapter adapter = new BleAdapter()) {
     adapter.scan(new ScanFilter(), 5000, (address, name, rssi) ->
@@ -329,6 +332,78 @@ AA:BB:CC:DD:EE:FF	MyDevice	-62
 ```
 
 Errors (e.g. Bluetooth powered off) are printed to stderr and exit with status 1.
+
+## Remote BLE adapters
+
+A machine with a real BT adapter can be controlled over the network by a server-side application,
+so that app can drive BLE hardware that isn't physically attached to it (e.g. a Niimbot printer
+plugged into a different machine than the one running BSStorageManager/BSDataFlow).
+
+**Client** (on the machine with the BT adapter) - run the standalone jar with `--remote` instead of
+a device-name search term:
+
+```bash
+java -jar target/common-java-utils-ble-<version>-standalone.jar \
+  --remote --server ws://host:port/ble-remote --name device-1 --token my-token
+```
+
+This spawns the local `ble-bridge` sidecar exactly as normal, then pipes its NDJSON lines to/from
+the server over a WebSocket connection (`--token` is optional; both the name and token are sent as
+upgrade request headers, not a first JSON message, so a bad token is rejected before the handshake
+completes). It runs until terminated, reconnecting with backoff on any connection drop while keeping
+the local sidecar alive across reconnects - this mode is exclusive with the local scan/search usage
+above.
+
+**Embedding the client as a library** (e.g. a desktop app that also talks to local BT hardware
+directly via `BleAdapter`) - use `cz.bliksoft.javautils.ble.remote.RemoteAdapterClient` directly
+instead of the CLI:
+
+```java
+RemoteAdapterClient client = new RemoteAdapterClient(URI.create("ws://host:port/ble-remote"),
+    "device-1", "my-token");
+client.setOnFatalError(e -> /* local sidecar died - notify the user, offer to restart, etc. */);
+client.start(); // non-blocking - runs on an internal daemon thread
+...
+client.close(); // stops it
+```
+
+`start()`/`close()` manage the background thread for you; `run()` (what the CLI uses) is also public
+if you'd rather block a thread you already own. **Caution:** don't point both a directly-used
+`BleAdapter` and a `RemoteAdapterClient` at the *same* peripheral address on the same machine at the
+same time - each spawns its own independent `ble-bridge` sidecar with its own OS-level connection to
+that peripheral, and neither the OS Bluetooth stack nor this library serializes access between them,
+so concurrent operations from both against the same device can race.
+
+**Server** (the host application, e.g. via Spring/Jetty/Undertow) - authenticate the WebSocket
+upgrade request yourself (the library owns no auth policy), then register the accepted connection
+wrapped as a `cz.bliksoft.javautils.ble.transport.BleLinePipe` (session send -> `send()`, session
+`onText` -> the `onLine` handler, session close -> the `onClose` handler) with a
+`cz.bliksoft.javautils.ble.remote.RemoteAdapterRegistry`:
+
+```java
+RemoteAdapterRegistry registry = new DefaultRemoteAdapterRegistry();
+// after authenticating the upgrade request yourself:
+registry.register(name, pipe);
+// elsewhere, once a connection is registered under that name:
+BleAdapter adapter = registry.adapterFor(name);
+BlePeripheral peripheral = adapter.getPeripheral(someAddress);
+```
+
+At most one connection is active per name; registering a new one under a name already in use
+replaces (and disconnects) the previous one. A dropped connection tears down its `BleAdapter`
+exactly like a local sidecar crash - call `adapterFor(name)` again after a reconnect to get a new
+one, rather than expecting the old instance to resume. `registry.requestNewSession(name)` asks the
+connected client to discard its sidecar and spawn a fresh one without dropping the connection - the
+remote equivalent of closing a local `BleAdapter` and constructing a new one; call `adapterFor(name)`
+again afterward to get the new instance.
+
+**Concurrency caveat:** the registry only keeps its own name->adapter bookkeeping consistent under
+concurrent calls - it does not protect a thread mid-operation on an `adapterFor(name)` result from a
+*different* thread concurrently calling `register`/`requestNewSession` for that same name, which
+tears down that exact `BleAdapter` out from under it (surfacing as a normal disconnect/exception, the
+same as an actual network drop would). If that race matters for your use of a given name, serialize
+registration-changing calls and adapter usage for that name yourself - see the `RemoteAdapterRegistry`
+Javadoc.
 
 ## Status
 

@@ -1,10 +1,6 @@
 package cz.bliksoft.javautils.ble;
 
-import java.io.BufferedReader;
 import java.io.IOException;
-import java.io.InputStreamReader;
-import java.io.OutputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -20,11 +16,14 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 
+import cz.bliksoft.javautils.ble.transport.BleLinePipe;
+import cz.bliksoft.javautils.ble.transport.ProcessLinePipe;
+
 /**
- * Entry point for this library. Launches and owns one {@code ble-bridge}
- * sidecar process (a bundled Rust/btleplug binary, see
- * {@link NativeBinaryLoader}) and speaks newline-delimited JSON with it over
- * stdin/stdout.
+ * Entry point for this library. Owns one {@link BleLinePipe} - normally a
+ * locally-spawned {@code ble-bridge} sidecar process (a bundled Rust/btleplug
+ * binary, see {@link NativeBinaryLoader}), reached via {@link ProcessLinePipe}
+ * - and speaks newline-delimited JSON over it.
  * <p>
  * The sidecar exists specifically so a native/driver-level BLE fault can't take
  * this JVM down with it: a crash surfaces as {@link BleSidecarException} /
@@ -49,9 +48,7 @@ public class BleAdapter implements AutoCloseable {
 	private static final long DEFAULT_TIMEOUT_MS = 15000;
 
 	private final ObjectMapper mapper = new ObjectMapper();
-	private final Process process;
-	private final OutputStream stdin;
-	private final Object writeLock = new Object();
+	private final BleLinePipe pipe;
 	private final AtomicLong idGenerator = new AtomicLong();
 	private final Map<String, CompletableFuture<JsonNode>> pending = new ConcurrentHashMap<>();
 	private final Map<String, BlePeripheral> peripherals = new ConcurrentHashMap<>();
@@ -62,27 +59,19 @@ public class BleAdapter implements AutoCloseable {
 	private volatile boolean closing = false;
 
 	public BleAdapter() throws BleSidecarException {
-		java.io.File binary = NativeBinaryLoader.extract();
-		try {
-			ProcessBuilder pb = new ProcessBuilder(binary.getAbsolutePath());
-			pb.redirectErrorStream(false);
-			this.process = pb.start();
-		} catch (IOException e) {
-			throw new BleSidecarException("failed to launch ble-bridge sidecar", e);
-		}
-		this.stdin = process.getOutputStream();
+		this(new ProcessLinePipe(NativeBinaryLoader.extract()));
+	}
 
-		Thread reader = new Thread(this::readLoop, "ble-bridge-reader");
-		reader.setDaemon(true);
-		reader.start();
-
-		Thread stderrPump = new Thread(this::stderrLoop, "ble-bridge-stderr");
-		stderrPump.setDaemon(true);
-		stderrPump.start();
-
-		Thread exitWatcher = new Thread(this::watchExit, "ble-bridge-exit-watcher");
-		exitWatcher.setDaemon(true);
-		exitWatcher.start();
+	/**
+	 * Wraps an already-established {@link BleLinePipe} - e.g. one backed by a
+	 * remote connection rather than a local sidecar process. Used by
+	 * {@code RemoteAdapterRegistry} to expose a remotely-driven adapter through the
+	 * exact same API as a local one.
+	 */
+	public BleAdapter(BleLinePipe pipe) {
+		this.pipe = pipe;
+		pipe.onLine(this::handleRawLine);
+		pipe.onClose(this::handlePipeClosed);
 	}
 
 	/**
@@ -182,27 +171,31 @@ public class BleAdapter implements AutoCloseable {
 	}
 
 	public boolean isAlive() {
-		return alive && process.isAlive();
+		return alive && pipe.isAlive();
 	}
 
 	@Override
 	public void close() {
 		closing = true;
 		alive = false;
-		try {
-			stdin.close();
-		} catch (IOException ignored) {
-			// sidecar may already be gone
-		}
-		try {
-			if (!process.waitFor(3, TimeUnit.SECONDS)) {
-				process.destroyForcibly();
-			}
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
-			process.destroyForcibly();
-		}
+		pipe.close();
 		failAllPending("adapter closed");
+	}
+
+	/**
+	 * Marks this adapter as no longer usable and fails any pending requests,
+	 * <b>without</b> closing the underlying {@link BleLinePipe} - unlike
+	 * {@link #close()}. For {@code RemoteAdapterRegistry}'s own use only: when it
+	 * replaces this adapter with a fresh one wrapping the exact <em>same</em>,
+	 * still-open transport (a session reset, not a real disconnect), the pipe
+	 * itself must survive - the new adapter is about to take over receiving from
+	 * it. Any other caller should use {@link #close()} instead, including when
+	 * genuinely done with a connection.
+	 */
+	public void invalidate() {
+		closing = true;
+		alive = false;
+		failAllPending("adapter session replaced");
 	}
 
 	// --- internals used by BlePeripheral
@@ -280,64 +273,33 @@ public class BleAdapter implements AutoCloseable {
 	}
 
 	private void writeLine(ObjectNode node) throws IOException {
-		byte[] bytes = (mapper.writeValueAsString(node) + "\n").getBytes(StandardCharsets.UTF_8);
-		synchronized (writeLock) {
-			stdin.write(bytes);
-			stdin.flush();
-		}
+		pipe.send(mapper.writeValueAsString(node));
 	}
 
-	// --- background threads
+	// --- pipe callbacks
 	// -------------------------------------------------------------------
 
-	private void readLoop() {
-		try (BufferedReader in = new BufferedReader(
-				new InputStreamReader(process.getInputStream(), StandardCharsets.UTF_8))) {
-			String line;
-			while ((line = in.readLine()) != null) {
-				if (line.trim().isEmpty()) {
-					continue;
-				}
-				try {
-					dispatch(mapper.readTree(line));
-				} catch (IOException e) {
-					LOG.log(Level.FINE, "unparseable line from ble-bridge: " + line, e);
-				}
-			}
-		} catch (IOException e) {
-			LOG.log(Level.FINE, "ble-bridge stdout closed", e);
-		}
-	}
-
-	private void stderrLoop() {
-		try (BufferedReader err = new BufferedReader(
-				new InputStreamReader(process.getErrorStream(), StandardCharsets.UTF_8))) {
-			String line;
-			while ((line = err.readLine()) != null) {
-				LOG.fine("[ble-bridge] " + line);
-			}
-		} catch (IOException ignored) {
-			// process gone
-		}
-	}
-
-	private void watchExit() {
-		try {
-			process.waitFor();
-		} catch (InterruptedException e) {
-			Thread.currentThread().interrupt();
+	private void handleRawLine(String line) {
+		if (line.trim().isEmpty()) {
 			return;
 		}
+		try {
+			dispatch(mapper.readTree(line));
+		} catch (IOException e) {
+			LOG.log(Level.FINE, "unparseable line from ble-bridge: " + line, e);
+		}
+	}
+
+	private void handlePipeClosed(String reason) {
 		alive = false;
 		if (closing) {
 			// close() already owns tearing down pending requests/peripherals for an
-			// intentional
-			// shutdown - reporting "sidecar_crashed" here would be a lie.
+			// intentional shutdown - reporting a disconnect here would be a lie.
 			return;
 		}
-		failAllPending("ble-bridge sidecar process exited unexpectedly");
+		failAllPending("ble line pipe closed unexpectedly: " + reason);
 		for (BlePeripheral p : peripherals.values()) {
-			p.fireDisconnected("sidecar_crashed");
+			p.fireDisconnected(reason);
 		}
 	}
 
