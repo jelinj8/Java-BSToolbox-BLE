@@ -4,6 +4,7 @@ import java.io.IOException;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.WebSocket;
+import java.net.http.WebSocketHandshakeException;
 import java.nio.ByteBuffer;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionStage;
@@ -16,6 +17,7 @@ import java.util.function.Consumer;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 
+import cz.bliksoft.javautils.ble.BleException;
 import cz.bliksoft.javautils.ble.BleSidecarException;
 import cz.bliksoft.javautils.ble.NativeBinaryLoader;
 import cz.bliksoft.javautils.ble.transport.ProcessLinePipe;
@@ -46,7 +48,7 @@ public final class RemoteAdapterClient implements AutoCloseable {
 	private final URI serverUri;
 	private final String name;
 	private final String token;
-	private volatile Consumer<BleSidecarException> onFatalError;
+	private volatile Consumer<BleException> onFatalError;
 	private Thread thread;
 
 	public RemoteAdapterClient(URI serverUri, String name, String token) {
@@ -57,12 +59,13 @@ public final class RemoteAdapterClient implements AutoCloseable {
 	}
 
 	/**
-	 * Registers a callback for when {@link #run()} exits early because the local
-	 * sidecar died (see {@link #run()}) while running under {@link #start()} (where
-	 * nothing else observes that failure). Replaces any previously set callback;
-	 * defaults to logging at {@code SEVERE}.
+	 * Registers a callback for when {@link #run()} exits early - the local sidecar
+	 * died, or the server rejected the connection outright (bad/missing auth token,
+	 * see {@link BleRemoteAuthException}) - while running under {@link #start()}
+	 * (where nothing else observes that failure). Replaces any previously set
+	 * callback; defaults to logging at {@code SEVERE}.
 	 */
-	public void setOnFatalError(Consumer<BleSidecarException> handler) {
+	public void setOnFatalError(Consumer<BleException> handler) {
 		this.onFatalError = handler != null ? handler
 				: e -> LOG.log(Level.SEVERE, "remote adapter client for '" + name + "' stopped", e);
 	}
@@ -82,7 +85,7 @@ public final class RemoteAdapterClient implements AutoCloseable {
 		thread = new Thread(() -> {
 			try {
 				run();
-			} catch (BleSidecarException e) {
+			} catch (BleException e) {
 				onFatalError.accept(e);
 			}
 		}, "ble-remote-client-" + name);
@@ -120,9 +123,12 @@ public final class RemoteAdapterClient implements AutoCloseable {
 	 * the local sidecar itself dies (not just the network connection), this throws
 	 * instead of trying to silently respawn it - same crash-isolation contract as
 	 * {@code BleAdapter}: whatever supervises this CLI process is expected to
-	 * restart it, rather than this method papering over a dead sidecar.
+	 * restart it, rather than this method papering over a dead sidecar. Likewise
+	 * throws immediately, without retrying, if the server rejects the connection's
+	 * auth token ({@link BleRemoteAuthException}) - the name/token are fixed at
+	 * construction, so retrying the same connection could never succeed.
 	 */
-	public void run() throws BleSidecarException {
+	public void run() throws BleException {
 		AtomicReference<ProcessLinePipe> sidecarRef = new AtomicReference<>(
 				new ProcessLinePipe(NativeBinaryLoader.extract()));
 		try {
@@ -140,8 +146,20 @@ public final class RemoteAdapterClient implements AutoCloseable {
 								"local ble-bridge sidecar died: " + ((SidecarDiedException) e.getCause()).reason
 										+ " (exit code " + sidecarRef.get().getExitCode() + ")");
 					}
-					LOG.log(Level.WARNING,
-							"remote connection to " + serverUri + " failed, retrying in " + backoff + "ms", e);
+					if (e.getCause() instanceof WebSocketHandshakeException) {
+						int status = ((WebSocketHandshakeException) e.getCause()).getResponse().statusCode();
+						if (status == 401) {
+							throw new BleRemoteAuthException("remote connection to " + serverUri
+									+ " rejected: access denied (HTTP 401) - check app.ble.remote-token; not "
+									+ "retrying, this cannot succeed without restarting with a corrected token");
+						}
+						LOG.warning(
+								"remote connection to " + serverUri + " rejected (HTTP " + status + "), retrying in "
+										+ backoff + "ms");
+					} else {
+						LOG.log(Level.WARNING,
+								"remote connection to " + serverUri + " failed, retrying in " + backoff + "ms", e);
+					}
 				} catch (Exception e) {
 					LOG.log(Level.WARNING,
 							"remote connection to " + serverUri + " failed, retrying in " + backoff + "ms", e);

@@ -11,7 +11,7 @@ import cz.bliksoft.javautils.ble.utils.BleUtils.BleDeviceResult;
 /**
  * Command-line entry point. With no arguments (or a device-name search
  * substring), scans for nearby peripherals and prints them as tab-separated
- * {@code ADDRESS\tNAME\tRSSI} lines to stdout - one device per line, {@code -}
+ * {@code ADDRESS\tRSSI\tNAME} lines to stdout - one device per line, {@code -}
  * in place of a missing name or RSSI (see {@link BleUtils#find} /
  * {@link BleUtils#scan}). With {@code --remote}, instead runs as a
  * {@link RemoteAdapterClient} - see README.md for both usages and how to build
@@ -32,8 +32,8 @@ public final class Main {
 			List<BleDeviceResult> results = searchTerm != null ? BleUtils.find(adapter, null, searchTerm, TIMEOUT_MS)
 					: BleUtils.scan(adapter, TIMEOUT_MS);
 			for (BleDeviceResult result : results) {
-				System.out.println(result.getAddress() + "\t" + (result.getName() != null ? result.getName() : "-")
-						+ "\t" + (result.getRssi() != null ? result.getRssi() : "-"));
+				System.out.println(result.getAddress() + "\t" + (result.getRssi() != null ? result.getRssi() : "-")
+						+ "\t" + (result.getName() != null ? result.getName() : "-"));
 			}
 		} catch (BleException e) {
 			System.err.println("error: " + e.getMessage());
@@ -73,7 +73,7 @@ public final class Main {
 		}
 		try {
 			new RemoteAdapterClient(URI.create(server), name, token).run();
-		} catch (BleSidecarException e) {
+		} catch (BleException e) {
 			System.err.println("error: " + e.getMessage());
 			System.exit(1);
 		}
