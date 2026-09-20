@@ -46,6 +46,21 @@ enum Command {
 	DiscoverServices { id: String, address: String },
 	Read { id: String, address: String, service_uuid: String, char_uuid: String },
 	Write { id: String, address: String, service_uuid: String, char_uuid: String, value_hex: String, with_response: bool },
+	// Splits value_hex into chunk_size-byte pieces and writes each in turn, sleeping
+	// chunk_delay_ms between writes - all within this one command's handling, so ordering is
+	// guaranteed by plain sequential control flow (no per-chunk round trip back to the caller,
+	// unlike repeated Write commands - see CLAUDE.md's "write_stream" note for why that round
+	// trip mattered enough to add this). Response only after every chunk has been attempted.
+	WriteStream {
+		id: String,
+		address: String,
+		service_uuid: String,
+		char_uuid: String,
+		value_hex: String,
+		with_response: bool,
+		chunk_size: usize,
+		chunk_delay_ms: u64,
+	},
 	Subscribe { id: String, address: String, service_uuid: String, char_uuid: String },
 	Unsubscribe { id: String, address: String, service_uuid: String, char_uuid: String },
 	AdapterState { id: String },
@@ -242,6 +257,43 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 			};
 			match platform_write(&state, &address, &service_uuid, &char_uuid, &bytes, with_response).await {
 				Ok(_) => {
+					let _ = tx.send(ok_response(&id, json!({})));
+				}
+				Err(e) => {
+					let _ = tx.send(err_response(&id, e));
+				}
+			}
+		}
+		Command::WriteStream {
+			id,
+			address,
+			service_uuid,
+			char_uuid,
+			value_hex,
+			with_response,
+			chunk_size,
+			chunk_delay_ms,
+		} => {
+			let bytes = match hex_decode(&value_hex) {
+				Ok(b) => b,
+				Err(e) => {
+					let _ = tx.send(err_response(&id, e));
+					return;
+				}
+			};
+			let chunk_size = chunk_size.max(1);
+			let mut result = Ok(());
+			for (i, chunk) in bytes.chunks(chunk_size).enumerate() {
+				if i > 0 && chunk_delay_ms > 0 {
+					tokio::time::sleep(Duration::from_millis(chunk_delay_ms)).await;
+				}
+				if let Err(e) = platform_write(&state, &address, &service_uuid, &char_uuid, chunk, with_response).await {
+					result = Err(format!("write failed at chunk {} of {}: {}", i + 1, bytes.chunks(chunk_size).len(), e));
+					break;
+				}
+			}
+			match result {
+				Ok(()) => {
 					let _ = tx.send(ok_response(&id, json!({})));
 				}
 				Err(e) => {

@@ -80,11 +80,25 @@ only thing that talks to its stdin/stdout. The protocol is one JSON object per l
 directions:
 
 - **Commands** (Java → Rust): tagged by a `cmd` field (`scan`, `stop_scan`, `connect`, `disconnect`,
-  `discover_services`, `read`, `write`, `subscribe`, `unsubscribe`, `pair`, plus the connection-
-  quality/diagnostic group `adapter_state`, `read_rssi`, `get_mtu`, `get_connection_parameters`,
-  `request_connection_parameters`), each carrying an `id` used to match it to its response. See the
-  `Command` enum in `ble-bridge/src/main.rs` and the `BleAdapter.sendRequest` overloads for the
-  canonical field lists. The diagnostic group is all backed by trait-default
+  `discover_services`, `read`, `write`, `write_stream`, `subscribe`, `unsubscribe`, `pair`, plus the
+  connection-quality/diagnostic group `adapter_state`, `read_rssi`, `get_mtu`,
+  `get_connection_parameters`, `request_connection_parameters`), each carrying an `id` used to
+  match it to its response. See the `Command` enum in `ble-bridge/src/main.rs` and the
+  `BleAdapter.sendRequest` overloads for the canonical field lists. `write_stream`
+  (`{"cmd":"write_stream","address":...,"service_uuid":...,"char_uuid":...,"value_hex":<whole
+  payload>,"with_response":bool,"chunk_size":...,"chunk_delay_ms":...}`, see
+  `BlePeripheral.writeCharacteristicStream`'s doc) splits `value_hex` into `chunk_size`-byte pieces
+  and writes each in turn (sleeping `chunk_delay_ms` between writes) entirely within this one
+  command's own handling - one round trip covers a whole one-way, ack-free transfer (e.g.
+  PTLabelPrint's Phomemo `d-series` label protocol) instead of one round trip per chunk, which
+  matters over a higher-latency link (this library's own remote-adapter feature, especially an
+  ESP32-class remote bridge - see `firmware-BSBleRemoteBridge`'s CLAUDE.md for the real-world bug
+  this fixed). Deliberately not built by pipelining repeated `write` commands without waiting for
+  each response instead: this process's own command loop (below) dispatches each incoming line as
+  an independent concurrent task with no ordering guarantee between them, so pipelined writes could
+  reach a peripheral out of order and corrupt a sequential byte stream; `write_stream` keeps the
+  whole chunk-by-chunk sequence inside one command's own sequential handling, sidestepping that
+  entirely. The diagnostic group is all backed by trait-default
   `btleplug::api::Peripheral`/`Central` methods that return `Err(NotSupported)` where a backend
   doesn't implement them - confirmed working on Windows for all five; other platforms untested.
   `read_rssi` on Windows additionally falls back to `win_gatt.rs`'s supplementary-watcher RSSI
