@@ -20,20 +20,26 @@ JSON on stdin/stdout. If the sidecar crashes or hangs, that surfaces as a normal
 It also sidesteps SimpleBLE's BUSL-1.1 licensing (commercial use requires a paid license);
 `btleplug` is MIT/Apache-2.0.
 
-**Pairing/bonding is not implemented yet — planned.** Today, if a peripheral's GATT requires
-OS-level bonding (MITM protection, a PIN prompt, etc), that has to happen through the OS's own
-Bluetooth settings/system pairing prompt before this library can connect to it; neither `btleplug`
-nor a from-scratch pairing implementation is wired up here, and `connect()` against an
-unpaired-but-bonding-required device will simply fail with a clear error. That's acceptable for now
-(most GATT operations don't need it - confirmed a plain unencrypted service connects and works
-fine, unpaired, with no OS interaction at all), but **programmatic pairing is a desired feature for
-a future release**: triggering pairing from this library and auto-supplying a known PIN/passkey,
-without the OS's system prompt appearing at all. Needed for peripherals that require authenticated
-bonding just to expose their GATT service (e.g. Niimbot label printers), where popping OS UI isn't
-acceptable for an unattended/embedded caller. Would need a new sidecar command wrapping, per
-platform: Windows - `DeviceInformationPairing.PairAsync` with a custom pairing handler that answers
-a `PairingRequested` event with the PIN automatically instead of surfacing a system prompt; Linux -
-BlueZ's D-Bus `Pair()` method with an agent registered to auto-respond with the PIN.
+**Programmatic pairing is implemented on Windows and Linux.** If a peripheral's GATT requires
+OS-level bonding (MITM protection, a PIN prompt, etc), call `BlePeripheral.pair(String pin)` right
+after `connect()` to pair from this library and auto-supply a known PIN/passkey — no OS system
+pairing prompt appears at all. Needed for peripherals that require authenticated bonding just to
+expose their GATT service (e.g. Niimbot label printers, MeshCore radios), where popping OS UI isn't
+acceptable for an unattended/embedded caller. Most GATT operations don't need this at all (a plain
+unencrypted service connects and works fine, unpaired, with no OS interaction) — only call `pair()`
+for a peripheral known to require it. Implemented per platform: Windows -
+`DeviceInformationPairing.PairAsync` with a custom pairing handler that answers a
+`PairingRequested` event with the PIN automatically (`ble-bridge/src/win_gatt.rs`); Linux - BlueZ's
+D-Bus `Pair()` method with an agent registered to auto-respond with the PIN
+(`ble-bridge/src/linux_pair.rs`). Verified against real PIN-protected/bonding-required peripherals
+on both platforms, with actual OS-level bonding confirmed afterward.
+
+**macOS: `pair()` is not supported, and never will be** — CoreBluetooth has no public API for
+programmatically supplying a pairing PIN/passkey at all. This is a permanent Apple platform
+restriction, not a gap in this library or in `btleplug`. On macOS, `pair()` fails immediately with
+a clear error; a peripheral that requires bonding must still be paired manually through the OS's
+own Bluetooth settings/system prompt before this library can connect to it, exactly as on every
+platform before this feature existed.
 
 ## Platform backends
 
@@ -415,9 +421,13 @@ the Windows scan/discovery gaps described above (the radio was invisible to scan
 unconnectable before the `win_gatt.rs` supplementary watcher and `add_peripheral()` fallback), and
 a Windows-only post-connect `subscribe()` flakiness (fixed by the automatic broad-discovery warm-up
 described above) that only showed up once reconnects became fast enough to no longer accidentally
-give the OS's GATT cache time to settle on its own.
-macOS has no automated or manual verification yet — the sidecar builds for it, but nothing has
-exercised it against real hardware.
+give the OS's GATT cache time to settle on its own. Programmatic pairing (`pair()`) is verified on
+both Windows and Linux against real PIN-protected, bonding-required peripherals, with actual
+OS-level bonding confirmed afterward - see "Why a sidecar process instead of a native binding"
+above. Not available on macOS (a permanent CoreBluetooth limitation, not a gap here).
+
+macOS has no automated or manual verification yet for anything else — the sidecar builds for it,
+but nothing has exercised it against real hardware.
 
 The public API is deliberately generic GATT-level (scan/connect/discover/read/write/subscribe) —
 no assumptions about any particular peripheral or protocol.
