@@ -89,7 +89,8 @@ directions:
   doesn't implement them - confirmed working on Windows for all five; other platforms untested.
   `read_rssi` on Windows additionally falls back to `win_gatt.rs`'s supplementary-watcher RSSI
   cache when `btleplug`'s own value is unavailable - see that module's doc comment. `pair` is
-  implemented on Windows and Linux so far, not yet macOS - see "Programmatic pairing" below.
+  implemented on Windows and Linux; not possible on macOS at all (permanent platform limitation,
+  not a gap) - see "Programmatic pairing" below.
 - **Responses** (Rust → Java): `{"type": "response", "id": ..., "ok": bool, ...}`. `BleAdapter`
   keeps a `CompletableFuture` per in-flight `id` in `pending`, resolved or failed by
   `handleResponse` when the matching line arrives.
@@ -148,7 +149,16 @@ of this library, are expected to need authenticated bonding just to talk to them
   first real attempt after one compile-error fix, confirmed bonded at the system level afterward
   (`bluetoothctl info <address>` showing `Paired: yes`/`Bonded: yes`), with zero prompt of any kind
   on this headless machine.
-- **macOS**: not planned yet.
+- **macOS**: not possible, permanently, via any public API - not a "not yet". CoreBluetooth has no
+  way for an app to supply a BLE pairing passkey/PIN programmatically (unlike Android's
+  `BluetoothDevice.setPin()`, or the Windows/Linux APIs this project already uses), and no way to
+  suppress or intercept the system's own pairing prompt - confirmed repeatedly on Apple's own
+  developer forums (e.g. `https://developer.apple.com/forums/thread/703663`), with no workaround
+  offered; Apple keeps BLE bonding entirely inside `bluetoothd`/system UI by design. `platform_pair`
+  on macOS returns a clear, permanent "not supported" error rather than "not implemented yet" -
+  don't spend time trying to close this gap without first finding an actual new Apple API. No
+  Mac has been available to test any of this locally - `ble-bridge-build.yml`'s existing
+  `aarch64-apple-darwin`/`x86_64-apple-darwin` matrix entries are the only current build coverage.
 
 Wire shape: `{"cmd":"pair","id":...,"address":...,"pin":...}`, response `{"type":"response",
 "id":...,"ok":bool[,"error":...]}` - same shape independently implemented by the ESP32-C6

@@ -597,7 +597,7 @@ async fn platform_unsubscribe(state: &AppState, address: &str, service_uuid: &st
 // Programmatic pairing - see CLAUDE.md's "Programmatic pairing" section. Windows goes through
 // win_gatt.rs (WinRT DeviceInformationCustomPairing); Linux through linux_pair.rs (a directly-
 // registered BlueZ Agent1, since btleplug's own Linux backend has no pairing support at all).
-// macOS not implemented yet.
+// macOS is a hard "not possible", not a "not yet" - see platform_pair's own doc comment below.
 #[cfg(target_os = "windows")]
 async fn platform_pair(address: &str, pin: &str) -> Result<(), String> {
 	win_gatt::pair(address, pin).await
@@ -608,9 +608,29 @@ async fn platform_pair(address: &str, pin: &str) -> Result<(), String> {
 	linux_pair::pair(address, pin).await
 }
 
-#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+// CoreBluetooth has no public API for this on macOS (or iOS) at all, in either direction: no way
+// for an app to supply a passkey/PIN programmatically (unlike Android's BluetoothDevice.setPin()
+// or Windows'/Linux's own vendor APIs this project already uses), and no way to suppress or
+// intercept the system's own pairing prompt - Apple keeps BLE bonding entirely inside
+// bluetoothd/the OS UI, by design, confirmed repeatedly on Apple's own developer forums (e.g.
+// https://developer.apple.com/forums/thread/703663) with no workaround offered. Pairing still
+// happens automatically the moment a connected app touches an encrypted characteristic, exactly
+// as it would with no `pair` command involved at all - it just always surfaces that system prompt
+// requiring a human to type the PIN, which is precisely what this command exists to avoid
+// elsewhere. This is a permanent platform boundary, not a backlog item - do not "fix" this without
+// first finding an actual new API from Apple that closes the gap described in that thread.
+#[cfg(target_os = "macos")]
 async fn platform_pair(_address: &str, _pin: &str) -> Result<(), String> {
-	Err("pair is not yet implemented on this platform (Windows only so far)".to_string())
+	Err("pair is not supported on macOS - CoreBluetooth has no API for an app to supply a BLE \
+		pairing PIN programmatically; pairing still happens automatically on first encrypted \
+		access, but always via the OS's own system prompt, which cannot be suppressed or \
+		answered from code"
+		.to_string())
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux", target_os = "macos")))]
+async fn platform_pair(_address: &str, _pin: &str) -> Result<(), String> {
+	Err("pair is not implemented on this platform".to_string())
 }
 
 // connect() is shared across all platforms (see win_gatt.rs for why Windows bypasses btleplug for
