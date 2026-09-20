@@ -92,14 +92,18 @@ use windows::Devices::Bluetooth::Advertisement::{
 	BluetoothLEAdvertisementReceivedEventArgs, BluetoothLEAdvertisementType, BluetoothLEAdvertisementWatcher,
 	BluetoothLEScanningMode,
 };
-use windows::Devices::Bluetooth::{BluetoothDeviceId, BluetoothLEDevice};
+use windows::Devices::Bluetooth::BluetoothLEDevice;
 use windows::Devices::Bluetooth::GenericAttributeProfile::{
 	GattCharacteristic, GattCharacteristicProperties, GattClientCharacteristicConfigurationDescriptorValue,
 	GattCommunicationStatus, GattDeviceService, GattSession, GattValueChangedEventArgs,
 };
+use windows::Devices::Enumeration::{
+	DeviceInformation, DeviceInformationCustomPairing, DevicePairingKinds, DevicePairingRequestedEventArgs,
+	DevicePairingResultStatus,
+};
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
-use windows::core::{GUID, Ref};
+use windows::core::{GUID, HSTRING, Ref};
 
 use crate::hex_encode;
 
@@ -584,4 +588,58 @@ impl Drop for WinSubscription {
 	fn drop(&mut self) {
 		let _ = self.characteristic.RemoveValueChanged(self.notify_token);
 	}
+}
+
+/// Programmatic pairing: supplies `pin` as the passkey automatically when the peripheral requests
+/// one (`DevicePairingKinds::ProvidePin`), with no system pairing UI ever shown - see main.rs's
+/// `Command::Pair` and CLAUDE.md's "Planned: programmatic pairing" note this implements. Also
+/// accepts a bare `ConfirmOnly` request (no PIN needed) transparently, since some peripherals pair
+/// that way instead; any other kind (`DisplayPin`/`ConfirmPinMatch`/`ProvidePasswordCredential`)
+/// is left unhandled - not calling `Accept`/`AcceptWithPin` on those lets that attempt fail/time
+/// out rather than risk auto-accepting something this function can't verify.
+pub async fn pair(address: &str, pin: &str) -> Result<(), String> {
+	let device = open_device(address).await?;
+	let device_id = device.BluetoothDeviceId().map_err(|e| e.to_string())?.Id().map_err(|e| e.to_string())?;
+	let device_info = DeviceInformation::CreateFromIdAsync(&device_id)
+		.map_err(|e| e.to_string())?
+		.await
+		.map_err(|e| format!("DeviceInformation::CreateFromIdAsync failed for {}: {}", address, e))?;
+	let pairing = device_info.Pairing().map_err(|e| e.to_string())?;
+	let custom = pairing.Custom().map_err(|e| e.to_string())?;
+
+	let pin_hstring = HSTRING::from(pin);
+	// TypedEventHandler isn't Send, so it must not still be in scope at the PairAsync().await below
+	// (see the DataWriter/IBuffer comment in write() for why this matters even though it's not used
+	// again) - the OS holds its own reference via COM once PairingRequested() registers it, same as
+	// every other handler in this module (e.g. subscribe()'s value_handler).
+	{
+		let handler: TypedEventHandler<DeviceInformationCustomPairing, DevicePairingRequestedEventArgs> = TypedEventHandler::new(
+			move |_sender, args: Ref<DevicePairingRequestedEventArgs>| {
+				if let Ok(args) = args.ok() {
+					match args.PairingKind() {
+						Ok(DevicePairingKinds::ProvidePin) => {
+							let _ = args.AcceptWithPin(&pin_hstring);
+						}
+						Ok(DevicePairingKinds::ConfirmOnly) => {
+							let _ = args.Accept();
+						}
+						_ => {}
+					}
+				}
+				Ok(())
+			},
+		);
+		custom.PairingRequested(&handler).map_err(|e| e.to_string())?;
+	}
+
+	let result = custom
+		.PairAsync(DevicePairingKinds::ProvidePin | DevicePairingKinds::ConfirmOnly)
+		.map_err(|e| e.to_string())?
+		.await
+		.map_err(|e| e.to_string())?;
+	let status = result.Status().map_err(|e| e.to_string())?;
+	if status != DevicePairingResultStatus::Paired {
+		return Err(format!("pairing failed: {:?}", status));
+	}
+	Ok(())
 }

@@ -50,6 +50,7 @@ enum Command {
 	GetMtu { id: String, address: String },
 	GetConnectionParameters { id: String, address: String },
 	RequestConnectionParameters { id: String, address: String, preset: String },
+	Pair { id: String, address: String, pin: String },
 }
 
 struct AppState {
@@ -331,6 +332,18 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 			}
 			Err(e) => tx.send(err_response(&id, e)).ok().unwrap_or(()),
 		},
+		// Programmatic pairing (no system prompt) - see CLAUDE.md's "Planned: programmatic
+		// pairing" note and win_gatt.rs's `pair` doc comment. Windows-only for now (built on the
+		// same BluetoothLEDevice resolution pattern win_gatt.rs already uses for everything past
+		// connect) - the peripheral must already be connected via a prior `Connect`, same
+		// precondition as read/write/subscribe.
+		Command::Pair { id, address, pin } => {
+			let result = platform_pair(&address, &pin).await;
+			let _ = tx.send(match result {
+				Ok(_) => ok_response(&id, json!({})),
+				Err(e) => err_response(&id, e),
+			});
+		}
 	}
 }
 
@@ -576,6 +589,19 @@ async fn platform_unsubscribe(_state: &AppState, address: &str, service_uuid: &s
 async fn platform_unsubscribe(state: &AppState, address: &str, service_uuid: &str, char_uuid: &str) -> Result<(), String> {
 	let (p, c) = find_characteristic(state, address, service_uuid, char_uuid).await?;
 	retry_gatt("unsubscribe", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.unsubscribe(&c)).await
+}
+
+// Programmatic pairing, Windows only for now (see CLAUDE.md's "Planned: programmatic pairing" -
+// Linux via BlueZ's D-Bus Pair() + a registered agent is the planned follow-up, tracked there, not
+// implemented here yet).
+#[cfg(target_os = "windows")]
+async fn platform_pair(address: &str, pin: &str) -> Result<(), String> {
+	win_gatt::pair(address, pin).await
+}
+
+#[cfg(not(target_os = "windows"))]
+async fn platform_pair(_address: &str, _pin: &str) -> Result<(), String> {
+	Err("pair is not yet implemented on this platform (Windows only so far)".to_string())
 }
 
 // connect() is shared across all platforms (see win_gatt.rs for why Windows bypasses btleplug for

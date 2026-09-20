@@ -109,6 +109,18 @@ public class BlePeripheral {
 	}
 
 	/**
+	 * Programmatically pairs/bonds with this peripheral, supplying {@code pin} as
+	 * the passkey automatically instead of surfacing any OS-level pairing prompt -
+	 * must already be connected (a prior {@link #connect()}). Currently
+	 * Windows-only (see {@code ble-bridge/src/win_gatt.rs}'s {@code pair} function
+	 * and this repo's CLAUDE.md, "Planned: programmatic pairing"); other platforms
+	 * throw {@link BleException} for now, with Linux support planned next.
+	 */
+	public void pair(String pin) throws BleException {
+		adapter.sendRequest("pair", fields("address", address, "pin", pin), CONNECT_TIMEOUT_MS);
+	}
+
+	/**
 	 * Fires whenever this peripheral drops - see {@link DisconnectListener} for the
 	 * crash-isolation case.
 	 */
