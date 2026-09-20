@@ -21,8 +21,21 @@ uuid = { version = "1", features = ["serde"] }
 # copy of `dbus` and unifies features onto it: "vendored" builds libdbus from source instead of
 # requiring a target-arch libdbus-1-dev package, which is what makes cross-compiling to
 # aarch64/armv7 (see .github/workflows/ble-bridge-build.yml) work without a matching sysroot.
+#
+# dbus-tokio/dbus-crossroads are used directly by src/linux_pair.rs (programmatic pairing - see
+# that module's doc comment): btleplug's own Linux backend (bluez-async, pulled in transitively)
+# has no pairing/agent support at all, so this goes around it via raw D-Bus, in the same spirit
+# win_gatt.rs goes around btleplug on Windows for a different reason. dbus-tokio is already in the
+# dependency graph transitively (via bluez-async) - listed explicitly here for the tokio-integrated
+# connection constructor (`dbus_tokio::connection::new_system_sync`) linux_pair.rs calls directly.
 [target.'cfg(target_os = "linux")'.dependencies]
 dbus = { version = "0.9.7", features = ["vendored"] }
+dbus-tokio = "0.7"
+dbus-crossroads = "0.5"
+# Generated org.bluez.* D-Bus interface proxies (AgentManager1::register_agent, Device1::pair) -
+# already in the dependency graph transitively via bluez-async (btleplug's own Linux backend);
+# listed explicitly here so linux_pair.rs can `use` it directly.
+bluez-generated = "0.4"
 
 # Pinned to the same version btleplug's Windows backend depends on. Used to bypass btleplug's own
 # GATT layer on Windows (see src/win_gatt.rs for why) - only the scan/connect/disconnect/central-

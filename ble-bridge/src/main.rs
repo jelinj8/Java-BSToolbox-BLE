@@ -33,6 +33,9 @@ use uuid::Uuid;
 #[cfg(target_os = "windows")]
 mod win_gatt;
 
+#[cfg(target_os = "linux")]
+mod linux_pair;
+
 #[derive(Deserialize)]
 #[serde(tag = "cmd", rename_all = "snake_case")]
 enum Command {
@@ -591,15 +594,21 @@ async fn platform_unsubscribe(state: &AppState, address: &str, service_uuid: &st
 	retry_gatt("unsubscribe", GATT_OP_ATTEMPT_TIMEOUT, GATT_OP_MAX_ATTEMPTS, || p.unsubscribe(&c)).await
 }
 
-// Programmatic pairing, Windows only for now (see CLAUDE.md's "Planned: programmatic pairing" -
-// Linux via BlueZ's D-Bus Pair() + a registered agent is the planned follow-up, tracked there, not
-// implemented here yet).
+// Programmatic pairing - see CLAUDE.md's "Programmatic pairing" section. Windows goes through
+// win_gatt.rs (WinRT DeviceInformationCustomPairing); Linux through linux_pair.rs (a directly-
+// registered BlueZ Agent1, since btleplug's own Linux backend has no pairing support at all).
+// macOS not implemented yet.
 #[cfg(target_os = "windows")]
 async fn platform_pair(address: &str, pin: &str) -> Result<(), String> {
 	win_gatt::pair(address, pin).await
 }
 
-#[cfg(not(target_os = "windows"))]
+#[cfg(target_os = "linux")]
+async fn platform_pair(address: &str, pin: &str) -> Result<(), String> {
+	linux_pair::pair(address, pin).await
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
 async fn platform_pair(_address: &str, _pin: &str) -> Result<(), String> {
 	Err("pair is not yet implemented on this platform (Windows only so far)".to_string())
 }

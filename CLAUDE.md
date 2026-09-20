@@ -89,7 +89,7 @@ directions:
   doesn't implement them - confirmed working on Windows for all five; other platforms untested.
   `read_rssi` on Windows additionally falls back to `win_gatt.rs`'s supplementary-watcher RSSI
   cache when `btleplug`'s own value is unavailable - see that module's doc comment. `pair` is
-  Windows-only so far - see "Programmatic pairing" below.
+  implemented on Windows and Linux so far, not yet macOS - see "Programmatic pairing" below.
 - **Responses** (Rust → Java): `{"type": "response", "id": ..., "ok": bool, ...}`. `BleAdapter`
   keeps a `CompletableFuture` per in-flight `id` in `pending`, resolved or failed by
   `handleResponse` when the matching line arrives.
@@ -135,12 +135,19 @@ of this library, are expected to need authenticated bonding just to talk to them
   PIN-protected peripheral (a MeshCore radio) - succeeded on the first attempt, both driven
   directly via `ble-bridge.exe`'s own stdin/stdout and via the ESP32-C6 remote-bridge firmware's
   independent NimBLE-based implementation of the same wire command.
-- **Linux** (planned, not yet implemented): BlueZ's D-Bus `Pair()` method with an agent registered
-  to auto-respond with the PIN (`btleplug`'s Linux backend doesn't expose pairing directly, so this
-  would likely need to go around it via direct D-Bus calls, similar in spirit to how `win_gatt.rs`
-  goes around `btleplug` on Windows for a different reason). `platform_pair` in `main.rs` already
-  has the `#[cfg(not(target_os = "windows"))]` branch stubbed out with a clear "not yet implemented
-  on this platform" error - that's where the Linux implementation goes.
+- **Linux** (implemented, 2026-09-20): `linux_pair.rs` registers our own `org.bluez.Agent1` D-Bus
+  object directly (`dbus`/`dbus-tokio`/`dbus-crossroads`, plus `bluez-generated`'s
+  `OrgBluezAgentManager1`/`OrgBluezDevice1` proxies - all already in the dependency graph
+  transitively via `bluez-async`, `btleplug`'s own Linux backend, which has no pairing support of
+  its own at all beyond a bare `Device1::Pair()` with no way to supply a PIN). Answers
+  `RequestPasskey`/`RequestPinCode` with whichever PIN the in-flight `pair()` call supplied
+  (looked up by BT address, parsed back out of the D-Bus device object path - `PENDING_PINS`),
+  registered with `KeyboardOnly` capability (same idea as Windows' `ProvidePin` / the ESP32
+  firmware's `BLE_HS_IO_KEYBOARD_ONLY`). Verified end-to-end on a real Raspberry Pi CM5 (Debian
+  13, BlueZ 5.82) against a real PIN-protected peripheral (a MeshCore radio) - succeeded on the
+  first real attempt after one compile-error fix, confirmed bonded at the system level afterward
+  (`bluetoothctl info <address>` showing `Paired: yes`/`Bonded: yes`), with zero prompt of any kind
+  on this headless machine.
 - **macOS**: not planned yet.
 
 Wire shape: `{"cmd":"pair","id":...,"address":...,"pin":...}`, response `{"type":"response",
