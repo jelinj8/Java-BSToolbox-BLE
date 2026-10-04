@@ -1,6 +1,7 @@
 package cz.bliksoft.javautils.ble;
 
 import java.io.IOException;
+import java.nio.file.Path;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
@@ -57,6 +58,44 @@ public class BleAdapter implements AutoCloseable {
 	private volatile CompletableFuture<JsonNode> scanFuture = null;
 	private volatile boolean alive = true;
 	private volatile boolean closing = false;
+
+	private static volatile Path defaultLogDir = null;
+	private volatile Path logDir = defaultLogDir;
+	/** Request id -> {cmd, address}, to name the response's traffic log file. */
+	private final Map<String, String[]> loggedRequests = new ConcurrentHashMap<>();
+
+	/**
+	 * Sets the traffic log folder for {@code BleAdapter}s created from now on (see
+	 * {@link #setLogDir(Path)}); {@code null} disables. Already existing adapters
+	 * are not affected.
+	 */
+	public static void setDefaultLogDir(Path dir) {
+		defaultLogDir = dir;
+	}
+
+	public static Path getDefaultLogDir() {
+		return defaultLogDir;
+	}
+
+	/**
+	 * Enables traffic logging of this adapter: every JSON line exchanged with the
+	 * sidecar is written to {@code dir} as
+	 * {@code <timestamp>-<address>-<cmd>-req.json} / {@code ...-resp.json},
+	 * unsolicited events as {@code <timestamp>-<address>-<type>-evt.json}
+	 * ({@code adapter} in place of the address for adapter-wide traffic). The
+	 * folder is created on demand. {@code null} disables. Initialized from
+	 * {@link #setDefaultLogDir(Path)}.
+	 */
+	public void setLogDir(Path dir) {
+		this.logDir = dir;
+		if (dir == null) {
+			loggedRequests.clear();
+		}
+	}
+
+	public Path getLogDir() {
+		return logDir;
+	}
 
 	public BleAdapter() throws BleSidecarException {
 		this(new ProcessLinePipe(NativeBinaryLoader.extract()));
@@ -213,16 +252,25 @@ public class BleAdapter implements AutoCloseable {
 		node.put("id", id);
 		CompletableFuture<JsonNode> future = new CompletableFuture<>();
 		pending.put(id, future);
+		Path dir = logDir;
+		if (dir != null) {
+			String cmd = node.path("cmd").asText(null);
+			String address = node.path("address").asText(null);
+			loggedRequests.put(id, new String[] { cmd, address });
+			BleTrafficLog.write(dir, mapper, address, cmd, "req", node);
+		}
 		try {
 			writeLine(node);
 		} catch (IOException e) {
 			pending.remove(id);
+			loggedRequests.remove(id);
 			throw new BleSidecarException("failed to write to sidecar stdin", e);
 		}
 		// Set a timeout on the future
 		Thread timeoutThread = new Thread(() -> {
 			try {
 				Thread.sleep(timeoutMs);
+				loggedRequests.remove(id);
 				future.completeExceptionally(new BleTimeoutException(
 						"timed out waiting for response to '" + node.get("cmd").asText() + "'"));
 			} catch (InterruptedException e) {
@@ -284,9 +332,25 @@ public class BleAdapter implements AutoCloseable {
 			return;
 		}
 		try {
-			dispatch(mapper.readTree(line));
+			JsonNode node = mapper.readTree(line);
+			logIncoming(node);
+			dispatch(node);
 		} catch (IOException e) {
 			LOG.log(Level.FINE, "unparseable line from ble-bridge: " + line, e);
+		}
+	}
+
+	private void logIncoming(JsonNode node) {
+		Path dir = logDir;
+		if (dir == null) {
+			return;
+		}
+		String type = node.path("type").asText("");
+		if ("response".equals(type)) {
+			String[] req = loggedRequests.remove(node.path("id").asText(""));
+			BleTrafficLog.write(dir, mapper, req == null ? null : req[1], req == null ? null : req[0], "resp", node);
+		} else {
+			BleTrafficLog.write(dir, mapper, node.path("address").asText(null), type, "evt", node);
 		}
 	}
 
@@ -309,6 +373,7 @@ public class BleAdapter implements AutoCloseable {
 			it.next().getValue().completeExceptionally(new BleSidecarException(message));
 			it.remove();
 		}
+		loggedRequests.clear();
 	}
 
 	private void dispatch(JsonNode node) {

@@ -8,6 +8,8 @@ import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -16,6 +18,7 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.BooleanSupplier;
 
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.io.TempDir;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -211,6 +214,45 @@ class BleAdapterTest {
 		assertFalse(adapter.isAlive());
 		ExecutionException ex = assertThrows(ExecutionException.class, () -> pending.get(1, TimeUnit.SECONDS));
 		assertInstanceOf(BleSidecarException.class, ex.getCause());
+	}
+
+	@Test
+	void trafficLogWritesRequestResponseAndEventFiles(@TempDir Path tmp) throws Exception {
+		Path dir = tmp.resolve("traffic");
+		FakeLinePipe pipe = new FakeLinePipe();
+		BleAdapter adapter = new BleAdapter(pipe);
+		adapter.setLogDir(dir);
+
+		ObjectNode read = command("read");
+		read.put("address", ADDRESS);
+		CompletableFuture<JsonNode> f = adapter.sendRequestAsync(read, 5000);
+		pipe.deliverLine("{\"type\":\"response\",\"id\":\"" + sentId(pipe, 0) + "\",\"ok\":true}");
+		f.get(1, TimeUnit.SECONDS);
+		pipe.deliverLine(
+				"{\"type\":\"notification\",\"address\":\"" + ADDRESS + "\",\"char_uuid\":\"x\",\"value_hex\":\"00\"}");
+
+		List<String> names;
+		try (java.util.stream.Stream<Path> files = Files.list(dir)) {
+			names = files.map(p -> p.getFileName().toString()).sorted().collect(java.util.stream.Collectors.toList());
+		}
+		assertEquals(3, names.size(), names.toString());
+		assertTrue(names.get(0).endsWith("-AA-BB-CC-DD-EE-FF-read-req.json"), names.get(0));
+		assertTrue(names.get(1).endsWith("-AA-BB-CC-DD-EE-FF-read-resp.json"), names.get(1));
+		assertTrue(names.get(2).endsWith("-AA-BB-CC-DD-EE-FF-notification-evt.json"), names.get(2));
+		assertEquals("read", mapper.readTree(dir.resolve(names.get(0)).toFile()).path("cmd").asText());
+	}
+
+	@Test
+	void trafficLogDisabledWritesNothing(@TempDir Path tmp) throws Exception {
+		FakeLinePipe pipe = new FakeLinePipe();
+		BleAdapter adapter = new BleAdapter(pipe);
+		adapter.setLogDir(null);
+		CompletableFuture<JsonNode> f = adapter.sendRequestAsync(command("adapter_state"), 5000);
+		pipe.deliverLine("{\"type\":\"response\",\"id\":\"" + sentId(pipe, 0) + "\",\"ok\":true}");
+		f.get(1, TimeUnit.SECONDS);
+		try (java.util.stream.Stream<Path> files = Files.list(tmp)) {
+			assertEquals(0, files.count());
+		}
 	}
 
 	private ObjectNode command(String cmd) {
