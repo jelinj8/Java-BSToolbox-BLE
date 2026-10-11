@@ -109,8 +109,12 @@ directions:
   keeps a `CompletableFuture` per in-flight `id` in `pending`, resolved or failed by
   `handleResponse` when the matching line arrives.
 - **Events** (Rust → Java, unsolicited): `device_found` (scan results), `notification`
-  (characteristic value changes), `connected`/`disconnected`, `fatal`/`error`. Dispatched by
-  `BleAdapter.dispatch` to the current `BleScanListener` or the relevant cached `BlePeripheral`.
+  (characteristic value changes), `connected`/`disconnected`, `adapter_state` (radio powered
+  on/off), `fatal`/`error`. Dispatched by `BleAdapter.dispatch` to the current `BleScanListener`,
+  the `AdapterStateListener` or the relevant cached `BlePeripheral`. `device_found` comes from
+  every advertisement-type `CentralEvent`, not just `DeviceDiscovered`/`DeviceUpdated`: btleplug
+  0.13's BlueZ backend never emits `DeviceUpdated` - an already-known device's advertisements
+  arrive only as `RssiUpdate`/`*Advertisement` events (see `handle_central_event`).
 
 Binary characteristic values are always hex-encoded on the wire (lowercase, no separators) — see
 `HexCodec.java` on the Java side and `hex_encode`/`hex_decode` in `main.rs` on the Rust side. Keep

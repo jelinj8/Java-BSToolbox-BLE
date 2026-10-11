@@ -276,6 +276,7 @@ Beyond the generic GATT surface above, `BleAdapter`/`BlePeripheral` also expose:
 
 ```java
 adapter.getAdapterState();               // AdapterState.POWERED_ON / POWERED_OFF / UNKNOWN
+adapter.setAdapterStateListener(state -> ...); // pushed on every radio power change, no polling
 peripheral.getMtu();                     // negotiated ATT MTU in bytes
 peripheral.readRssi();                   // current signal strength in dBm
 peripheral.getConnectionParameters();    // ConnectionParameters (interval/latency/supervision timeout), or null

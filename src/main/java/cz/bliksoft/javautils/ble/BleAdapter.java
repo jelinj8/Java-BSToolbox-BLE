@@ -54,6 +54,7 @@ public class BleAdapter implements AutoCloseable {
 	private final Map<String, CompletableFuture<JsonNode>> pending = new ConcurrentHashMap<>();
 	private final Map<String, BlePeripheral> peripherals = new ConcurrentHashMap<>();
 	private volatile BleScanListener scanListener;
+	private volatile AdapterStateListener adapterStateListener;
 	private volatile ScanFilter scanFilter;
 	private volatile CompletableFuture<JsonNode> scanFuture = null;
 	private volatile boolean alive = true;
@@ -199,14 +200,18 @@ public class BleAdapter implements AutoCloseable {
 	 */
 	public AdapterState getAdapterState() throws BleException {
 		JsonNode resp = sendRequest("adapter_state", null, DEFAULT_TIMEOUT_MS);
-		switch (resp.path("state").asText("unknown")) {
-		case "powered_on":
-			return AdapterState.POWERED_ON;
-		case "powered_off":
-			return AdapterState.POWERED_OFF;
-		default:
-			return AdapterState.UNKNOWN;
-		}
+		return AdapterState.fromWire(resp.path("state").asText("unknown"));
+	}
+
+	/**
+	 * Fires whenever the Bluetooth radio's power state changes, as the OS reports
+	 * it - no polling of {@link #getAdapterState()} needed. Peripherals that were
+	 * connected when the radio went off additionally get their own
+	 * {@link DisconnectListener} callback. A remote adapter (see README, "Remote
+	 * BLE adapters") reports this only if its own bridge sends the event.
+	 */
+	public void setAdapterStateListener(AdapterStateListener listener) {
+		this.adapterStateListener = listener;
 	}
 
 	public boolean isAlive() {
@@ -412,6 +417,12 @@ public class BleAdapter implements AutoCloseable {
 			BlePeripheral dp = peripherals.get(node.path("address").asText(""));
 			if (dp != null) {
 				dp.fireDisconnected(node.path("reason").asText("unknown"));
+			}
+			break;
+		case "adapter_state":
+			AdapterStateListener al = adapterStateListener;
+			if (al != null) {
+				al.onAdapterStateChanged(AdapterState.fromWire(node.path("state").asText("unknown")));
 			}
 			break;
 		case "connected":

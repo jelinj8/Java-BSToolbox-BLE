@@ -16,13 +16,11 @@ use btleplug::api::{
 // btleplug's GATT layer entirely, see win_gatt.rs.
 #[cfg(not(target_os = "windows"))]
 use btleplug::api::{CharPropFlags, WriteType};
-// BDAddr/PeripheralId: only used by get_peripheral's add_peripheral() fallback, which is
-// Windows-only - see its own doc comment for why.
+// BDAddr: only used by get_peripheral's add_peripheral() fallback, which is Windows-only - see its
+// own doc comment for why.
 #[cfg(target_os = "windows")]
 use btleplug::api::BDAddr;
-#[cfg(target_os = "windows")]
-use btleplug::platform::PeripheralId;
-use btleplug::platform::{Adapter, Manager, Peripheral};
+use btleplug::platform::{Adapter, Manager, Peripheral, PeripheralId};
 use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -412,25 +410,26 @@ fn central_state_str(state: &CentralState) -> &'static str {
 
 async fn handle_central_event(state: &Arc<AppState>, tx: &UnboundedSender<Value>, evt: CentralEvent) {
 	match evt {
-		CentralEvent::DeviceDiscovered(id) | CentralEvent::DeviceUpdated(id) => {
-			if let Ok(p) = state.adapter.peripheral(&id).await {
-				if let Ok(Some(props)) = p.properties().await {
-					let addr = props.address.to_string().to_uppercase();
-					state.peripherals.lock().unwrap().insert(addr.clone(), p.clone());
-					let _ = tx.send(json!({
-						"type": "device_found",
-						"address": addr,
-						"name": props.local_name,
-						"rssi": props.rssi,
-					}));
-				}
-			}
+		CentralEvent::DeviceDiscovered(id) | CentralEvent::DeviceUpdated(id) => report_device_found(state, tx, &id, None).await,
+		// btleplug 0.13's BlueZ backend never emits DeviceUpdated: a peripheral BlueZ already knows
+		// (any earlier scan, by any process) gets one DeviceDiscovered when the event stream opens -
+		// before any scan, with no RSSI - and from then on its advertisements arrive only as these
+		// per-field events. Confirmed on real hardware (Niimbot M2, Debian 13/BlueZ 5.82): without
+		// them, every scan after the first one never reported the printer, though it was advertising.
+		CentralEvent::RssiUpdate { id, rssi } => report_device_found(state, tx, &id, Some(rssi)).await,
+		CentralEvent::ManufacturerDataAdvertisement { id, .. }
+		| CentralEvent::ServiceDataAdvertisement { id, .. }
+		| CentralEvent::ServicesAdvertisement { id, .. } => report_device_found(state, tx, &id, None).await,
+		// Radio switched on/off (rfkill, OS toggle, USB dongle unplugged) - pushed so the caller
+		// needn't poll `adapter_state` or wait for a request to time out to notice.
+		CentralEvent::StateUpdate(s) => {
+			let _ = tx.send(json!({"type": "adapter_state", "state": central_state_str(&s)}));
 		}
 		CentralEvent::DeviceConnected(id) => {
 			if let Ok(p) = state.adapter.peripheral(&id).await {
 				if let Ok(Some(props)) = p.properties().await {
 					let addr = props.address.to_string().to_uppercase();
-					state.peripherals.lock().unwrap().insert(addr.clone(), p.clone());
+					let p = cache_peripheral(state, &addr, p);
 					let _ = tx.send(json!({"type": "connected", "address": addr}));
 					spawn_notification_forwarder(state.clone(), tx.clone(), addr, p);
 				}
@@ -446,6 +445,34 @@ async fn handle_central_event(state: &Arc<AppState>, tx: &UnboundedSender<Value>
 			}
 		}
 		_ => {}
+	}
+}
+
+/// Returns the instance already cached for `addr`, caching `p` only if there is none - never
+/// replaces one. On BlueZ every `adapter.peripheral()` call builds a new `Peripheral` with its own,
+/// empty services map, and btleplug maps a notification to its characteristic through the map of
+/// the instance its `notifications()` stream came from - a notification for a characteristic that
+/// map doesn't know is dropped silently. Replacing the cached instance (as every scan event used to)
+/// left the notification forwarder on an instance `discover_services` never populated. Confirmed on
+/// real hardware (Niimbot M2, BlueZ 5.82): the first session after BlueZ had forgotten the
+/// unpaired device - a few minutes idle - got every reply on air (btmon) but none delivered.
+fn cache_peripheral(state: &AppState, addr: &str, p: Peripheral) -> Peripheral {
+	state.peripherals.lock().unwrap().entry(addr.to_string()).or_insert(p).clone()
+}
+
+/// `rssi` overrides the peripheral's cached properties - an RssiUpdate event carries the fresh value.
+async fn report_device_found(state: &Arc<AppState>, tx: &UnboundedSender<Value>, id: &PeripheralId, rssi: Option<i16>) {
+	if let Ok(p) = state.adapter.peripheral(id).await {
+		if let Ok(Some(props)) = p.properties().await {
+			let addr = props.address.to_string().to_uppercase();
+			cache_peripheral(state, &addr, p);
+			let _ = tx.send(json!({
+				"type": "device_found",
+				"address": addr,
+				"name": props.local_name,
+				"rssi": rssi.or(props.rssi),
+			}));
+		}
 	}
 }
 
@@ -486,8 +513,7 @@ async fn get_peripheral(state: &AppState, address: &str) -> Result<Peripheral, S
 	for p in list {
 		if let Ok(Some(props)) = p.properties().await {
 			if props.address.to_string().to_uppercase() == key {
-				state.peripherals.lock().unwrap().insert(key.clone(), p.clone());
-				return Ok(p);
+				return Ok(cache_peripheral(state, &key, p));
 			}
 		}
 	}
@@ -506,8 +532,7 @@ async fn get_peripheral(state: &AppState, address: &str) -> Result<Peripheral, S
 	#[cfg(target_os = "windows")]
 	if let Ok(addr) = address.parse::<BDAddr>() {
 		if let Ok(p) = state.adapter.add_peripheral(&PeripheralId::from(addr)).await {
-			state.peripherals.lock().unwrap().insert(key.clone(), p.clone());
-			return Ok(p);
+			return Ok(cache_peripheral(state, &key, p));
 		}
 	}
 	Err(format!(
