@@ -450,7 +450,10 @@ public class BleAdapter implements AutoCloseable {
 		if (node.path("ok").asBoolean(false)) {
 			future.complete(node);
 		} else {
-			future.completeExceptionally(new BleConnectException(node.path("error").asText("request failed")));
+			String error = node.path("error").asText("request failed");
+			future.completeExceptionally(
+					"bond_rejected".equals(node.path("error_code").asText(null)) ? new BleBondRejectedException(error)
+							: new BleConnectException(error));
 		}
 	}
 }

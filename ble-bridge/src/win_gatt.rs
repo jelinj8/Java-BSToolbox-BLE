@@ -83,6 +83,7 @@
 use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::Mutex;
+use std::time::Duration;
 
 use btleplug::api::BDAddr;
 use serde_json::{json, Value};
@@ -98,8 +99,8 @@ use windows::Devices::Bluetooth::GenericAttributeProfile::{
 	GattCommunicationStatus, GattDeviceService, GattSession, GattValueChangedEventArgs,
 };
 use windows::Devices::Enumeration::{
-	DeviceInformation, DeviceInformationCustomPairing, DevicePairingKinds, DevicePairingRequestedEventArgs,
-	DevicePairingResultStatus,
+	DeviceInformation, DeviceInformationCustomPairing, DeviceInformationPairing, DevicePairingKinds,
+	DevicePairingRequestedEventArgs, DevicePairingResultStatus, DeviceUnpairingResultStatus,
 };
 use windows::Foundation::TypedEventHandler;
 use windows::Storage::Streams::{DataReader, DataWriter, IBuffer};
@@ -393,17 +394,35 @@ async fn find_service(device: &BluetoothLEDevice, service_uuid: &str) -> Result<
 		.ok_or_else(|| format!("service {} not found", service_uuid))
 }
 
+/// How often, and how far apart, `find_characteristic_on` retries an `AccessDenied` lookup.
+const ACCESS_DENIED_ATTEMPTS: u32 = 6;
+const ACCESS_DENIED_DELAY: Duration = Duration::from_secs(1);
+
+/// Retries `AccessDenied` on the same service proxy: right after reconnecting to a bonded
+/// peripheral, Windows answers the first lookup of a protected characteristic that way while it is
+/// still re-establishing encryption - confirmed on real hardware (MeshCore nRF52 radio): every
+/// reconnect's first `subscribe` failed with it, the app's own retry a few seconds later worked.
+/// Not with a fresh proxy: two open at once are themselves rejected with `AccessDenied` (see the
+/// module doc).
 async fn find_characteristic_on(service: &GattDeviceService, char_uuid: &str) -> Result<GattCharacteristic, String> {
 	let cu = Uuid::parse_str(char_uuid).map_err(|e| e.to_string())?;
-	let result = service
-		.GetCharacteristicsForUuidAsync(to_guid(&cu))
-		.map_err(|e| e.to_string())?
-		.await
-		.map_err(|e| e.to_string())?;
-	let status = result.Status().map_err(|e| e.to_string())?;
-	if status != GattCommunicationStatus::Success {
-		return Err(format!("GetCharacteristicsForUuidAsync({}) failed: {:?}", char_uuid, status));
-	}
+	let mut attempt = 1;
+	let result = loop {
+		let result = service
+			.GetCharacteristicsForUuidAsync(to_guid(&cu))
+			.map_err(|e| e.to_string())?
+			.await
+			.map_err(|e| e.to_string())?;
+		let status = result.Status().map_err(|e| e.to_string())?;
+		if status == GattCommunicationStatus::Success {
+			break result;
+		}
+		if status != GattCommunicationStatus::AccessDenied || attempt == ACCESS_DENIED_ATTEMPTS {
+			return Err(format!("GetCharacteristicsForUuidAsync({}) failed: {:?}", char_uuid, status));
+		}
+		attempt += 1;
+		tokio::time::sleep(ACCESS_DENIED_DELAY).await;
+	};
 	result
 		.Characteristics()
 		.map_err(|e| e.to_string())?
@@ -598,13 +617,7 @@ impl Drop for WinSubscription {
 /// is left unhandled - not calling `Accept`/`AcceptWithPin` on those lets that attempt fail/time
 /// out rather than risk auto-accepting something this function can't verify.
 pub async fn pair(address: &str, pin: &str) -> Result<(), String> {
-	let device = open_device(address).await?;
-	let device_id = device.BluetoothDeviceId().map_err(|e| e.to_string())?.Id().map_err(|e| e.to_string())?;
-	let device_info = DeviceInformation::CreateFromIdAsync(&device_id)
-		.map_err(|e| e.to_string())?
-		.await
-		.map_err(|e| format!("DeviceInformation::CreateFromIdAsync failed for {}: {}", address, e))?;
-	let pairing = device_info.Pairing().map_err(|e| e.to_string())?;
+	let pairing = device_pairing(address).await?;
 	let custom = pairing.Custom().map_err(|e| e.to_string())?;
 
 	let pin_hstring = HSTRING::from(pin);
@@ -642,4 +655,33 @@ pub async fn pair(address: &str, pin: &str) -> Result<(), String> {
 		return Err(format!("pairing failed: {:?}", status));
 	}
 	Ok(())
+}
+
+/// The OS pairing state/controls of `address` - shared by `pair`, `is_bonded` and `unpair`.
+async fn device_pairing(address: &str) -> Result<DeviceInformationPairing, String> {
+	let device = open_device(address).await?;
+	let device_id = device.BluetoothDeviceId().map_err(|e| e.to_string())?.Id().map_err(|e| e.to_string())?;
+	let device_info = DeviceInformation::CreateFromIdAsync(&device_id)
+		.map_err(|e| e.to_string())?
+		.await
+		.map_err(|e| format!("DeviceInformation::CreateFromIdAsync failed for {}: {}", address, e))?;
+	device_info.Pairing().map_err(|e| e.to_string())
+}
+
+/// Whether Windows holds a pairing for `address`. A device Windows can't resolve is not paired.
+pub async fn is_bonded(address: &str) -> Result<bool, String> {
+	match device_pairing(address).await {
+		Ok(pairing) => pairing.IsPaired().map_err(|e| e.to_string()),
+		Err(_) => Ok(false),
+	}
+}
+
+/// Removes Windows' pairing (stored keys) for `address` - see main.rs's `Command::Unpair`.
+pub async fn unpair(address: &str) -> Result<(), String> {
+	let pairing = device_pairing(address).await?;
+	let result = pairing.UnpairAsync().map_err(|e| e.to_string())?.await.map_err(|e| e.to_string())?;
+	match result.Status().map_err(|e| e.to_string())? {
+		DeviceUnpairingResultStatus::Unpaired | DeviceUnpairingResultStatus::AlreadyUnpaired => Ok(()),
+		status => Err(format!("unpairing failed: {:?}", status)),
+	}
 }

@@ -41,6 +41,13 @@ a clear error; a peripheral that requires bonding must still be paired manually 
 own Bluetooth settings/system prompt before this library can connect to it, exactly as on every
 platform before this feature existed.
 
+**A peripheral that lost its bond** (factory reset, wiped storage) rejects the key the OS still
+holds: the link comes up, encryption fails and the OS drops it again, on every attempt. On Windows
+and Linux `connect()` recognises that - the device is bonded and a link established during the
+connect dropped - and throws `BleBondRejectedException` instead of retrying. Call
+`BlePeripheral.unpair()` to drop the stale bond, scan again (BlueZ forgets an unpaired device
+entirely) and `pair()` after the next `connect()`.
+
 ## Platform backends
 
 On Linux and macOS, every operation (scan/connect/disconnect/discover/read/write/subscribe) goes

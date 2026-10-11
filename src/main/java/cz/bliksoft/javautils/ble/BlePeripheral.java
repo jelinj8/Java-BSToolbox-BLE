@@ -55,6 +55,10 @@ public class BlePeripheral {
 		return connected;
 	}
 
+	/**
+	 * @throws BleBondRejectedException the peripheral rejected the stored bond
+	 *                                  (Windows, Linux) - see that exception
+	 */
 	public void connect() throws BleException {
 		adapter.sendRequest("connect", fields("address", address), CONNECT_TIMEOUT_MS);
 		connected = true;
@@ -147,13 +151,23 @@ public class BlePeripheral {
 	/**
 	 * Programmatically pairs/bonds with this peripheral, supplying {@code pin} as
 	 * the passkey automatically instead of surfacing any OS-level pairing prompt -
-	 * must already be connected (a prior {@link #connect()}). Currently
-	 * Windows-only (see {@code ble-bridge/src/win_gatt.rs}'s {@code pair} function
-	 * and this repo's CLAUDE.md, "Planned: programmatic pairing"); other platforms
-	 * throw {@link BleException} for now, with Linux support planned next.
+	 * must already be connected (a prior {@link #connect()}). Windows and Linux
+	 * (see this repo's CLAUDE.md, "Programmatic pairing"); macOS throws
+	 * {@link BleException}.
 	 */
 	public void pair(String pin) throws BleException {
 		adapter.sendRequest("pair", fields("address", address, "pin", pin), CONNECT_TIMEOUT_MS);
+	}
+
+	/**
+	 * Removes the OS-level bond with this peripheral - e.g. after
+	 * {@link #connect()} threw {@link BleBondRejectedException}. Need not be
+	 * connected, nor scanned for; succeeds if there is no bond. On Linux BlueZ
+	 * forgets the device entirely, so scan for it again before the next
+	 * {@link #connect()}. Windows and Linux only.
+	 */
+	public void unpair() throws BleException {
+		adapter.sendRequest("unpair", fields("address", address), CONNECT_TIMEOUT_MS);
 	}
 
 	/**

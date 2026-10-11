@@ -7,7 +7,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use btleplug::api::{
 	Central, CentralEvent, CentralState, ConnectionParameterPreset, Manager as _, Peripheral as _, ScanFilter,
@@ -67,12 +67,18 @@ enum Command {
 	GetConnectionParameters { id: String, address: String },
 	RequestConnectionParameters { id: String, address: String, preset: String },
 	Pair { id: String, address: String, pin: String },
+	Unpair { id: String, address: String },
 }
 
 struct AppState {
 	adapter: Adapter,
 	peripherals: Mutex<HashMap<String, Peripheral>>,
 	notif_started: Mutex<HashSet<String>>,
+	/// Per address, when the current link came up - see `short_links`.
+	link_up_since: Mutex<HashMap<String, Instant>>,
+	/// Per address, how many links have dropped within SHORT_LINK of coming up - `connect` compares
+	/// it before and after, see BOND_REJECTED_SHORT_LINKS.
+	short_links: Mutex<HashMap<String, u32>>,
 }
 
 #[tokio::main]
@@ -117,6 +123,8 @@ async fn main() {
 		adapter,
 		peripherals: Mutex::new(HashMap::new()),
 		notif_started: Mutex::new(HashSet::new()),
+		link_up_since: Mutex::new(HashMap::new()),
+		short_links: Mutex::new(HashMap::new()),
 	});
 
 	// Forward adapter-level discovery/connect/disconnect events for as long as the process runs.
@@ -204,8 +212,34 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 		}
 		Command::Connect { id, address } => match get_peripheral(&state, &address).await {
 			Ok(p) => {
+				// A bonded peripheral that has lost its copy of the bond (factory reset, wiped
+				// storage) rejects the stored key: the link comes up, encryption fails ("PIN or Key
+				// Missing"), and the host drops it about 0.3s later - twice per attempt (BlueZ
+				// retries once), on every attempt, so retrying is pointless. BlueZ 5.82 doesn't
+				// expose that disconnect reason (Device1.Disconnected doesn't exist there), so it's
+				// inferred: bonded, and BOND_REJECTED_SHORT_LINKS links that came up during this
+				// connect dropped within SHORT_LINK. Counting any dropped link misfired on a radio
+				// whose GATT had hung: links encrypted fine, but dropped after ~30s of unanswered
+				// requests. A link that never got established (LL_CONNECTION_FAILED_TO_BE_ESTABLISHED,
+				// BlueZ: "le-connection-abort-by-local") is just as short, but fails the attempt at
+				// once, while a rejected key leaves it hanging - such an attempt doesn't count.
+				// Confirmed on real hardware (MeshCore nRF52 and ESP32 radios, Debian 13/BlueZ 5.82,
+				// btmon).
+				let key = address.to_uppercase();
+				let bonded = platform_is_bonded(&key).await.unwrap_or(false);
+				let short_before = short_links(&state, &key);
+				let dropped = || short_links(&state, &key) >= short_before + BOND_REJECTED_SHORT_LINKS;
+				let rejected = |err: &str| bonded && dropped() && !err.contains(LINK_NOT_ESTABLISHED);
 				let p2 = p.clone();
-				match retry_gatt("connect", CONNECT_ATTEMPT_TIMEOUT, CONNECT_MAX_ATTEMPTS, || p2.connect()).await {
+				let result = retry_gatt_unless(
+					"connect",
+					CONNECT_ATTEMPT_TIMEOUT,
+					CONNECT_MAX_ATTEMPTS,
+					|| p2.connect(),
+					|err| rejected(err),
+				)
+				.await;
+				match result {
 					Ok(_) => {
 						// Windows/WinRT has been observed needing a few seconds after connect to
 						// finish resolving the bonded device's private address / establishing the
@@ -214,7 +248,14 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 						// whole discover_services retry budget. This costs a couple of seconds on
 						// every connect, on every platform, to avoid that stall where it's been seen.
 						tokio::time::sleep(POST_CONNECT_SETTLE_DELAY).await;
-						let _ = tx.send(ok_response(&id, json!({})));
+						if bonded && dropped() && !p.is_connected().await.unwrap_or(false) {
+							let _ = tx.send(bond_rejected_response(&id, &address));
+						} else {
+							let _ = tx.send(ok_response(&id, json!({})));
+						}
+					}
+					Err(e) if rejected(&e) => {
+						let _ = tx.send(bond_rejected_response(&id, &address));
 					}
 					Err(e) => {
 						let _ = tx.send(err_response(&id, e));
@@ -397,6 +438,20 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 				Err(e) => err_response(&id, e),
 			});
 		}
+		// Drops the OS-level bond, e.g. after `connect` answered `bond_rejected`. On Linux BlueZ
+		// forgets the device entirely - it must be scanned for again before the next connect.
+		Command::Unpair { id, address } => {
+			let result = platform_unpair(&address).await;
+			if result.is_ok() {
+				let key = address.to_uppercase();
+				state.peripherals.lock().unwrap().remove(&key);
+				state.notif_started.lock().unwrap().remove(&key);
+			}
+			let _ = tx.send(match result {
+				Ok(_) => ok_response(&id, json!({})),
+				Err(e) => err_response(&id, e),
+			});
+		}
 	}
 }
 
@@ -429,6 +484,7 @@ async fn handle_central_event(state: &Arc<AppState>, tx: &UnboundedSender<Value>
 			if let Ok(p) = state.adapter.peripheral(&id).await {
 				if let Ok(Some(props)) = p.properties().await {
 					let addr = props.address.to_string().to_uppercase();
+					state.link_up_since.lock().unwrap().insert(addr.clone(), Instant::now());
 					let p = cache_peripheral(state, &addr, p);
 					let _ = tx.send(json!({"type": "connected", "address": addr}));
 					spawn_notification_forwarder(state.clone(), tx.clone(), addr, p);
@@ -440,12 +496,20 @@ async fn handle_central_event(state: &Arc<AppState>, tx: &UnboundedSender<Value>
 				if let Ok(Some(props)) = p.properties().await {
 					let addr = props.address.to_string().to_uppercase();
 					state.notif_started.lock().unwrap().remove(&addr);
+					let up_since = state.link_up_since.lock().unwrap().remove(&addr);
+					if up_since.is_some_and(|t| t.elapsed() < SHORT_LINK) {
+						*state.short_links.lock().unwrap().entry(addr.clone()).or_insert(0) += 1;
+					}
 					let _ = tx.send(json!({"type": "disconnected", "address": addr, "reason": "peripheral_disconnected"}));
 				}
 			}
 		}
 		_ => {}
 	}
+}
+
+fn short_links(state: &AppState, addr: &str) -> u32 {
+	state.short_links.lock().unwrap().get(addr).copied().unwrap_or(0)
 }
 
 /// Returns the instance already cached for `addr`, caching `p` only if there is none - never
@@ -710,6 +774,37 @@ async fn platform_pair(_address: &str, _pin: &str) -> Result<(), String> {
 	Err("pair is not implemented on this platform".to_string())
 }
 
+#[cfg(target_os = "windows")]
+async fn platform_is_bonded(address: &str) -> Result<bool, String> {
+	win_gatt::is_bonded(address).await
+}
+
+#[cfg(target_os = "linux")]
+async fn platform_is_bonded(address: &str) -> Result<bool, String> {
+	linux_pair::is_bonded(address).await
+}
+
+// macOS keeps bonding inside the OS (see platform_pair above) - nothing to detect or undo from here.
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+async fn platform_is_bonded(_address: &str) -> Result<bool, String> {
+	Ok(false)
+}
+
+#[cfg(target_os = "windows")]
+async fn platform_unpair(address: &str) -> Result<(), String> {
+	win_gatt::unpair(address).await
+}
+
+#[cfg(target_os = "linux")]
+async fn platform_unpair(address: &str) -> Result<(), String> {
+	linux_pair::unpair(address).await
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "linux")))]
+async fn platform_unpair(_address: &str) -> Result<(), String> {
+	Err("unpair is not supported on this platform - remove the device in the OS's Bluetooth settings".to_string())
+}
+
 // connect() is shared across all platforms (see win_gatt.rs for why Windows bypasses btleplug for
 // everything past connect, but not connect itself). Windows/WinRT can take a few seconds after
 // connect to finish resolving the bonded device's private address in the background
@@ -730,13 +825,37 @@ const RETRY_DELAY: Duration = Duration::from_millis(500);
 
 const POST_CONNECT_SETTLE_DELAY: Duration = Duration::from_secs(2);
 
+// Bond-rejected detection, see Command::Connect. A link rejected for a missing key lived ~0.3s.
+const SHORT_LINK: Duration = Duration::from_secs(1);
+const BOND_REJECTED_SHORT_LINKS: u32 = 2;
+const LINK_NOT_ESTABLISHED: &str = "le-connection-abort-by-local";
+
 /// Retries a btleplug GATT operation, bounding each attempt so a hung one doesn't block forever.
-/// Used for `connect` (all platforms) and, on Linux/macOS only, `discover_services`/read/write/
-/// subscribe/unsubscribe - see win_gatt.rs for why Windows doesn't route those through here.
-async fn retry_gatt<T, F, Fut>(label: &str, attempt_timeout: Duration, max_attempts: u32, mut op: F) -> Result<T, String>
+/// Used for `discover_services`/read/write/subscribe/unsubscribe on Linux/macOS only - see
+/// win_gatt.rs for why Windows doesn't route those through here; `connect` (all platforms) uses
+/// [`retry_gatt_unless`] directly.
+#[cfg_attr(target_os = "windows", allow(dead_code))]
+async fn retry_gatt<T, F, Fut>(label: &str, attempt_timeout: Duration, max_attempts: u32, op: F) -> Result<T, String>
 where
 	F: FnMut() -> Fut,
 	Fut: std::future::Future<Output = Result<T, btleplug::Error>>,
+{
+	retry_gatt_unless(label, attempt_timeout, max_attempts, op, |_| false).await
+}
+
+/// [`retry_gatt`], but gives up early once `give_up(error)` says a failed attempt isn't worth
+/// repeating.
+async fn retry_gatt_unless<T, F, Fut, G>(
+	label: &str,
+	attempt_timeout: Duration,
+	max_attempts: u32,
+	mut op: F,
+	give_up: G,
+) -> Result<T, String>
+where
+	F: FnMut() -> Fut,
+	Fut: std::future::Future<Output = Result<T, btleplug::Error>>,
+	G: Fn(&str) -> bool,
 {
 	let mut last_err = format!("{} retries exhausted", label);
 	for attempt in 1..=max_attempts {
@@ -744,6 +863,9 @@ where
 			Ok(Ok(v)) => return Ok(v),
 			Ok(Err(e)) => last_err = e.to_string(),
 			Err(_) => last_err = format!("{} attempt {}/{} timed out after {:?}", label, attempt, max_attempts, attempt_timeout),
+		}
+		if give_up(&last_err) {
+			break;
 		}
 		if attempt < max_attempts {
 			tokio::time::sleep(RETRY_DELAY).await;
@@ -774,6 +896,22 @@ fn ok_response(id: &str, extra: Value) -> Value {
 
 fn err_response(id: &str, message: String) -> Value {
 	json!({"type": "response", "id": id, "ok": false, "error": message})
+}
+
+/// `connect`'s answer for a bond the peripheral no longer accepts - `error_code` lets the caller
+/// tell it from any other connect failure (Java: `BleBondRejectedException`).
+fn bond_rejected_response(id: &str, address: &str) -> Value {
+	json!({
+		"type": "response",
+		"id": id,
+		"ok": false,
+		"error_code": "bond_rejected",
+		"error": format!(
+			"{} rejected the stored pairing (the link dropped right after connecting) - it has \
+			 probably lost its bond, e.g. after a reset; unpair and pair again",
+			address
+		),
+	})
 }
 
 #[cfg(not(target_os = "windows"))]

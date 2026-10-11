@@ -26,7 +26,7 @@ use dbus::message::MatchRule;
 use dbus::nonblock::stdintf::org_freedesktop_dbus::ObjectManager;
 use dbus::nonblock::{self, SyncConnection};
 use dbus::Path;
-use bluez_generated::{OrgBluezAgentManager1, OrgBluezDevice1};
+use bluez_generated::{OrgBluezAdapter1, OrgBluezAgentManager1, OrgBluezDevice1};
 use dbus_crossroads::{Crossroads, IfaceBuilder, MethodErr};
 use tokio::sync::OnceCell;
 
@@ -34,6 +34,7 @@ const AGENT_PATH: &str = "/cz/bliksoft/blebridge/agent";
 const DBUS_TIMEOUT: Duration = Duration::from_secs(30);
 
 static CONNECTION: OnceCell<Arc<SyncConnection>> = OnceCell::const_new();
+static AGENT_REGISTERED: OnceCell<()> = OnceCell::const_new();
 
 /// Address (uppercased "AA:BB:CC:DD:EE:FF") -> the PIN the currently in-flight `pair()` call for
 /// it supplied. Only ever holds entries for pairings actually requested through this module - the
@@ -58,10 +59,9 @@ fn pin_for_device(device: &Path<'static>) -> Result<String, MethodErr> {
 		.ok_or_else(|| MethodErr::failed(&format!("no pending pair() request for {}", address)))
 }
 
-/// Registers (once) our `Agent1` object and makes it the default agent - see the module doc
-/// comment for the overall approach. Returns the shared connection for callers to build their own
-/// `nonblock::Proxy`s from.
-async fn ensure_agent() -> Result<Arc<SyncConnection>, String> {
+/// The shared system-bus connection (opened once) - see [`ensure_agent`] for the agent registered
+/// on it, which `is_bonded`/`unpair` don't need.
+async fn ensure_connection() -> Result<Arc<SyncConnection>, String> {
 	CONNECTION
 		.get_or_try_init(|| async {
 			let (resource, conn) = dbus_tokio::connection::new_system_sync().map_err(|e| e.to_string())?;
@@ -69,7 +69,19 @@ async fn ensure_agent() -> Result<Arc<SyncConnection>, String> {
 				let err = resource.await;
 				eprintln!("[ble-bridge] D-Bus system connection lost: {}", err);
 			});
+			Ok::<_, String>(conn)
+		})
+		.await
+		.cloned()
+}
 
+/// Registers (once) our `Agent1` object and makes it the default agent - see the module doc
+/// comment for the overall approach. Returns the shared connection for callers to build their own
+/// `nonblock::Proxy`s from.
+async fn ensure_agent() -> Result<Arc<SyncConnection>, String> {
+	let conn = ensure_connection().await?;
+	AGENT_REGISTERED
+		.get_or_try_init(|| async {
 			let mut cr = Crossroads::new();
 			let iface_token = cr.register("org.bluez.Agent1", |b: &mut IfaceBuilder<()>| {
 				b.method("RequestPinCode", ("device",), ("pincode",), |_ctx, _data, (device,): (Path<'static>,)| {
@@ -126,10 +138,10 @@ async fn ensure_agent() -> Result<Arc<SyncConnection>, String> {
 			bluez.register_agent(Path::from(AGENT_PATH), "KeyboardOnly").await.map_err(|e| e.to_string())?;
 			bluez.request_default_agent(Path::from(AGENT_PATH)).await.map_err(|e| e.to_string())?;
 
-			Ok(conn)
+			Ok::<_, String>(())
 		})
-		.await
-		.cloned()
+		.await?;
+	Ok(conn)
 }
 
 async fn find_adapter_path(conn: &Arc<SyncConnection>) -> Result<Path<'static>, String> {
@@ -142,11 +154,14 @@ async fn find_adapter_path(conn: &Arc<SyncConnection>) -> Result<Path<'static>, 
 		.ok_or_else(|| "no BlueZ adapter found".to_string())
 }
 
+fn device_path(adapter_path: &Path<'static>, address: &str) -> Path<'static> {
+	Path::from(format!("{}/dev_{}", adapter_path, address.to_uppercase().replace(':', "_")))
+}
+
 pub async fn pair(address: &str, pin: &str) -> Result<(), String> {
 	let conn = ensure_agent().await?;
 	let adapter_path = find_adapter_path(&conn).await?;
-	let device_path: Path<'static> =
-		Path::from(format!("{}/dev_{}", adapter_path, address.to_uppercase().replace(':', "_")));
+	let device_path = device_path(&adapter_path, address);
 
 	let key = address.to_uppercase();
 	PENDING_PINS.lock().unwrap().get_or_insert_with(HashMap::new).insert(key.clone(), pin.to_string());
@@ -158,4 +173,31 @@ pub async fn pair(address: &str, pin: &str) -> Result<(), String> {
 		m.remove(&key);
 	}
 	result
+}
+
+/// Whether BlueZ holds a bond (stored keys) for `address`. `Bonded` only exists since BlueZ 5.68 -
+/// older versions report it through `Paired` alone. A device BlueZ doesn't know is not bonded.
+pub async fn is_bonded(address: &str) -> Result<bool, String> {
+	let conn = ensure_connection().await?;
+	let adapter_path = find_adapter_path(&conn).await?;
+	let device = nonblock::Proxy::new("org.bluez", device_path(&adapter_path, address), DBUS_TIMEOUT, conn);
+	match device.bonded().await {
+		Ok(b) => Ok(b),
+		Err(e) if e.name() == Some("org.freedesktop.DBus.Error.UnknownObject") => Ok(false),
+		Err(_) => device.paired().await.or(Ok(false)),
+	}
+}
+
+/// Removes the device - and with it the stored bond - from BlueZ (`Adapter1::RemoveDevice`), the
+/// counterpart of `bluetoothctl remove`. BlueZ forgets the device entirely, so it has to be scanned
+/// for again before the next connect. A device BlueZ doesn't know counts as already unpaired.
+pub async fn unpair(address: &str) -> Result<(), String> {
+	let conn = ensure_connection().await?;
+	let adapter_path = find_adapter_path(&conn).await?;
+	let adapter = nonblock::Proxy::new("org.bluez", adapter_path.clone(), DBUS_TIMEOUT, conn);
+	match adapter.remove_device(device_path(&adapter_path, address)).await {
+		Ok(()) => Ok(()),
+		Err(e) if e.name() == Some("org.bluez.Error.DoesNotExist") => Ok(()),
+		Err(e) => Err(e.to_string()),
+	}
 }

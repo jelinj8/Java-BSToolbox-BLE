@@ -80,7 +80,7 @@ only thing that talks to its stdin/stdout. The protocol is one JSON object per l
 directions:
 
 - **Commands** (Java → Rust): tagged by a `cmd` field (`scan`, `stop_scan`, `connect`, `disconnect`,
-  `discover_services`, `read`, `write`, `write_stream`, `subscribe`, `unsubscribe`, `pair`, plus the
+  `discover_services`, `read`, `write`, `write_stream`, `subscribe`, `unsubscribe`, `pair`, `unpair`, plus the
   connection-quality/diagnostic group `adapter_state`, `read_rssi`, `get_mtu`,
   `get_connection_parameters`, `request_connection_parameters`), each carrying an `id` used to
   match it to its response. See the `Command` enum in `ble-bridge/src/main.rs` and the
@@ -107,7 +107,9 @@ directions:
   not a gap) - see "Programmatic pairing" below.
 - **Responses** (Rust → Java): `{"type": "response", "id": ..., "ok": bool, ...}`. `BleAdapter`
   keeps a `CompletableFuture` per in-flight `id` in `pending`, resolved or failed by
-  `handleResponse` when the matching line arrives.
+  `handleResponse` when the matching line arrives. A failed response may carry an `error_code`;
+  the only one so far is `connect`'s `bond_rejected`, thrown as `BleBondRejectedException` - see
+  "Lost bonds" below.
 - **Events** (Rust → Java, unsolicited): `device_found` (scan results), `notification`
   (characteristic value changes), `connected`/`disconnected`, `adapter_state` (radio powered
   on/off), `fatal`/`error`. Dispatched by `BleAdapter.dispatch` to the current `BleScanListener`,
@@ -182,6 +184,34 @@ Wire shape: `{"cmd":"pair","id":...,"address":...,"pin":...}`, response `{"type"
 "id":...,"ok":bool[,"error":...]}` - same shape independently implemented by the ESP32-C6
 remote-bridge firmware (`firmware-BSBleRemoteBridge`), which got there first; this sidecar
 implementation matches it deliberately.
+
+### Lost bonds (`bond_rejected`, `unpair`)
+
+A bonded peripheral that has lost its own copy of the bond (factory reset, settings storage wiped
+on restart) can't be reached until the host drops its stale one: the link comes up, the host
+starts encryption with the stored key, the peripheral answers "PIN or Key Missing", the host
+disconnects with "Authentication Failure" - on every attempt, and without asking to pair again.
+Seen on real hardware (2026-10-11, Debian 13/BlueZ 5.82, btmon): a MeshCore nRF52 radio that lost
+its settings on every restart left BSMeshcoreCompanion retrying forever.
+
+- **Detection** (`connect`, Windows and Linux): BlueZ 5.82 has no `Device1.Disconnected` signal
+  carrying the reason, so it's inferred - the device is bonded (`platform_is_bonded`: BlueZ
+  `Bonded`/`Paired`, Windows `DeviceInformationPairing.IsPaired`) and at least
+  `BOND_REJECTED_SHORT_LINKS` (2) links that came up during this `connect` dropped within
+  `SHORT_LINK` (1s) - `AppState.short_links`, timed from `DeviceConnected` to `DeviceDisconnected`.
+  A rejected key drops the link ~0.3s after it comes up, twice per attempt (BlueZ retries once).
+  Counting every dropped link misfired on a radio whose GATT had hung (links encrypted fine, then
+  dropped after ~30s of unanswered requests) and removed a valid bond. An attempt that failed with
+  `le-connection-abort-by-local` (the link was never established - seen with an ESP32 radio, strong
+  signal, plain `bluetoothctl connect` failing the same way) doesn't count: its links are just as
+  short, but a rejected key leaves the attempt hanging instead of failing it. Then `connect` stops
+  retrying and answers `{"ok":false,"error_code":"bond_rejected",...}`, also when that happened
+  during the post-connect settle delay after a successful attempt.
+- **`unpair`** (`{"cmd":"unpair","id":...,"address":...}`): BlueZ `Adapter1.RemoveDevice` (like
+  `bluetoothctl remove` - BlueZ forgets the device, so scan again before connecting) / Windows
+  `DeviceInformationPairing.UnpairAsync`. Needs no prior connect or scan; an unknown or unpaired
+  device succeeds. Not on macOS (the OS owns bonding there), nor in the ESP32 remote-bridge
+  firmware yet.
 
 ## Release process
 
