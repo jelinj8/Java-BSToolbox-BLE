@@ -1,0 +1,5 @@
+# Formatting-only commits - skipped by git blame (git config blame.ignoreRevsFile .git-blame-ignore-revs;
+# GitHub and Forgejo pick this file up automatically).
+
+# Apply src/formatter/EclipseFormatter.xml to the whole codebase
+17f555aaf9f73023fc8ce5b809f9bd6ae5cb6ca7
