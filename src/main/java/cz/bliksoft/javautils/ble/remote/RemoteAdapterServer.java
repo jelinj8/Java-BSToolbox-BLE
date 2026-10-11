@@ -19,20 +19,25 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Hosts the dial-in side of a remote-BLE-adapter connection directly over a plain {@link ServerSocket} -
- * no HTTP server, no Spring, no third-party WebSocket library. Accepts a {@code RemoteAdapterClient}'s
- * WebSocket upgrade by hand (just enough RFC 6455 to interoperate with {@code java.net.http.WebSocket},
- * the one real client this needs to support - see {@link WsFrameCodec}), authenticates it the same way
+ * Hosts the dial-in side of a remote-BLE-adapter connection directly over a
+ * plain {@link ServerSocket} - no HTTP server, no Spring, no third-party
+ * WebSocket library. Accepts a {@code RemoteAdapterClient}'s WebSocket upgrade
+ * by hand (just enough RFC 6455 to interoperate with
+ * {@code java.net.http.WebSocket}, the one real client this needs to support -
+ * see {@link WsFrameCodec}), authenticates it the same way
  * {@code StorageManagerServer}'s {@code BleRemoteAuthInterceptor} does -
- * {@value #NAME_HEADER} header + {@code Authorization: Bearer <token>} - then wraps the connection as a
- * {@link ServerSocketLinePipe} and registers it with a {@link RemoteAdapterRegistry}, exactly like
- * {@code SpringSessionLinePipe}/{@code BleRemoteWebSocketHandler} do for a Spring-hosted server.
+ * {@value #NAME_HEADER} header + {@code Authorization: Bearer <token>} - then
+ * wraps the connection as a {@link ServerSocketLinePipe} and registers it with
+ * a {@link RemoteAdapterRegistry}, exactly like
+ * {@code SpringSessionLinePipe}/{@code BleRemoteWebSocketHandler} do for a
+ * Spring-hosted server.
  *
  * <p>
- * Deliberately its own {@link ServerSocket}/port, not plugged into an existing HTTP server: verified
- * empirically that {@code com.sun.net.httpserver.HttpExchange} cannot be hijacked for raw bytes after a
- * {@code 101} response through its public API, so there's no clean way to share an existing embedded HTTP
- * server's port for this.
+ * Deliberately its own {@link ServerSocket}/port, not plugged into an existing
+ * HTTP server: verified empirically that
+ * {@code com.sun.net.httpserver.HttpExchange} cannot be hijacked for raw bytes
+ * after a {@code 101} response through its public API, so there's no clean way
+ * to share an existing embedded HTTP server's port for this.
  */
 public final class RemoteAdapterServer implements Closeable {
 
@@ -58,7 +63,10 @@ public final class RemoteAdapterServer implements Closeable {
 		this.registry = registry;
 	}
 
-	/** Binds the listening socket and starts accepting connections on a daemon thread. */
+	/**
+	 * Binds the listening socket and starts accepting connections on a daemon
+	 * thread.
+	 */
 	public synchronized void start() throws IOException {
 		if (serverSocket != null) {
 			throw new IllegalStateException("RemoteAdapterServer is already started");
@@ -70,7 +78,10 @@ public final class RemoteAdapterServer implements Closeable {
 		LOG.info("RemoteAdapterServer listening on port " + serverSocket.getLocalPort());
 	}
 
-	/** Actual bound port - useful when constructed with port {@code 0} (let the OS pick one), e.g. in tests. */
+	/**
+	 * Actual bound port - useful when constructed with port {@code 0} (let the OS
+	 * pick one), e.g. in tests.
+	 */
 	public int getLocalPort() {
 		ServerSocket s = serverSocket;
 		if (s == null) {
@@ -79,7 +90,10 @@ public final class RemoteAdapterServer implements Closeable {
 		return s.getLocalPort();
 	}
 
-	/** Stops accepting new connections and closes every currently-open one. Safe to call more than once. */
+	/**
+	 * Stops accepting new connections and closes every currently-open one. Safe to
+	 * call more than once.
+	 */
 	@Override
 	public synchronized void close() {
 		ServerSocket s = serverSocket;
@@ -135,8 +149,8 @@ public final class RemoteAdapterServer implements Closeable {
 			name = headers.get(NAME_HEADER);
 			String rejection = validate(headers);
 			if (rejection != null) {
-				LOG.warning("Rejected BLE remote-adapter handshake" + (name != null ? " for '" + name + "'" : "")
-						+ ": " + rejection);
+				LOG.warning("Rejected BLE remote-adapter handshake" + (name != null ? " for '" + name + "'" : "") + ": "
+						+ rejection);
 				out.write(rejection.getBytes(StandardCharsets.US_ASCII));
 				out.flush();
 				closeQuietly(socket);
@@ -157,13 +171,15 @@ public final class RemoteAdapterServer implements Closeable {
 				LOG.info("BLE remote adapter '" + name + "' disconnected");
 			}
 		} catch (IOException e) {
-			LOG.log(Level.FINE, "BLE remote-adapter connection ended" + (name != null ? " for '" + name + "'" : ""),
-					e);
+			LOG.log(Level.FINE, "BLE remote-adapter connection ended" + (name != null ? " for '" + name + "'" : ""), e);
 			closeQuietly(socket);
 		}
 	}
 
-	/** {@code null} if the handshake couldn't be parsed at all (not a valid request). */
+	/**
+	 * {@code null} if the handshake couldn't be parsed at all (not a valid
+	 * request).
+	 */
 	private static Map<String, String> readHandshakeHeaders(InputStream in) throws IOException {
 		String requestLine = WsFrameCodec.readLine(in);
 		if (requestLine == null || requestLine.isEmpty()) {
@@ -183,7 +199,10 @@ public final class RemoteAdapterServer implements Closeable {
 		return headers;
 	}
 
-	/** Returns a full HTTP status-line response to write back and close on, or {@code null} if valid. */
+	/**
+	 * Returns a full HTTP status-line response to write back and close on, or
+	 * {@code null} if valid.
+	 */
 	private String validate(Map<String, String> headers) {
 		String upgrade = headers.get(UPGRADE_HEADER);
 		if (upgrade == null || !upgrade.toLowerCase(Locale.ROOT).contains("websocket")) {
@@ -208,8 +227,8 @@ public final class RemoteAdapterServer implements Closeable {
 
 	private static void writeHandshakeAccept(OutputStream out, String secWebSocketKey) throws IOException {
 		String accept = acceptKeyFor(secWebSocketKey != null ? secWebSocketKey : "");
-		String response = "HTTP/1.1 101 Switching Protocols\r\n" + "Upgrade: websocket\r\n"
-				+ "Connection: Upgrade\r\n" + "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
+		String response = "HTTP/1.1 101 Switching Protocols\r\n" + "Upgrade: websocket\r\n" + "Connection: Upgrade\r\n"
+				+ "Sec-WebSocket-Accept: " + accept + "\r\n\r\n";
 		out.write(response.getBytes(StandardCharsets.US_ASCII));
 		out.flush();
 	}

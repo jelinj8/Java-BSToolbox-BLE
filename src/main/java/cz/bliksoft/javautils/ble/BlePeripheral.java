@@ -97,27 +97,30 @@ public class BlePeripheral {
 	}
 
 	/**
-	 * Splits {@code value} into {@code chunkSize}-byte pieces and writes each in turn (sleeping
-	 * {@code chunkDelayMs} between writes), all as <b>one</b> sidecar/bridge-side operation - a
-	 * single request/response round trip covers the whole transfer, instead of one round trip per
-	 * chunk. Built for one-way, ack-free protocols that already send many same-characteristic
-	 * writes back-to-back with a fixed inter-write delay (e.g. Phomemo's {@code d-series} label
-	 * protocol) - calling {@link #writeCharacteristic} in a loop for that shape works correctly
-	 * over a low-latency link, but on a higher-latency one (this library's own remote-adapter
-	 * feature, especially an ESP32-class remote bridge) that per-chunk round trip can make the
-	 * whole transfer slow enough to blow a downstream peripheral's own real-time expectations for
-	 * long transfers, even though every individual write still succeeds.
+	 * Splits {@code value} into {@code chunkSize}-byte pieces and writes each in
+	 * turn (sleeping {@code chunkDelayMs} between writes), all as <b>one</b>
+	 * sidecar/bridge-side operation - a single request/response round trip covers
+	 * the whole transfer, instead of one round trip per chunk. Built for one-way,
+	 * ack-free protocols that already send many same-characteristic writes
+	 * back-to-back with a fixed inter-write delay (e.g. Phomemo's {@code d-series}
+	 * label protocol) - calling {@link #writeCharacteristic} in a loop for that
+	 * shape works correctly over a low-latency link, but on a higher-latency one
+	 * (this library's own remote-adapter feature, especially an ESP32-class remote
+	 * bridge) that per-chunk round trip can make the whole transfer slow enough to
+	 * blow a downstream peripheral's own real-time expectations for long transfers,
+	 * even though every individual write still succeeds.
 	 *
 	 * <p>
-	 * Deliberately <b>not</b> built by pipelining repeated {@link #writeCharacteristic} calls
-	 * without waiting for each response: the sidecar dispatches each incoming command as an
-	 * independent concurrent task with no ordering guarantee between them (see
-	 * {@code ble-bridge/src/main.rs}'s command loop), so firing many writes without waiting could
-	 * let them reach the peripheral out of order and corrupt a sequential byte stream like this
-	 * one. Sending the whole payload as a single {@code write_stream} command keeps the entire
-	 * chunk-by-chunk write sequence inside that one command's own sequential handling on the
-	 * sidecar/bridge side, so ordering is guaranteed by construction rather than by the caller
-	 * waiting on each response.
+	 * Deliberately <b>not</b> built by pipelining repeated
+	 * {@link #writeCharacteristic} calls without waiting for each response: the
+	 * sidecar dispatches each incoming command as an independent concurrent task
+	 * with no ordering guarantee between them (see {@code ble-bridge/src/main.rs}'s
+	 * command loop), so firing many writes without waiting could let them reach the
+	 * peripheral out of order and corrupt a sequential byte stream like this one.
+	 * Sending the whole payload as a single {@code write_stream} command keeps the
+	 * entire chunk-by-chunk write sequence inside that one command's own sequential
+	 * handling on the sidecar/bridge side, so ordering is guaranteed by
+	 * construction rather than by the caller waiting on each response.
 	 */
 	public void writeCharacteristicStream(String serviceUuid, String charUuid, byte[] value, boolean withResponse,
 			int chunkSize, long chunkDelayMs) throws BleException {

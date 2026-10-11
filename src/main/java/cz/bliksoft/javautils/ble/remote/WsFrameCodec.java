@@ -10,13 +10,15 @@ import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 
 /**
- * Minimal RFC 6455 WebSocket frame reader/writer over a raw {@link Socket} - just enough to
- * interoperate with {@code java.net.http.WebSocket} (the one real client {@link RemoteAdapterServer}
- * needs to support, since both endpoints of this connection are ours). Handles text/ping/pong/close
- * frames; deliberately does not support fragmented (multi-frame) messages - the only client here
- * ({@code RemoteAdapterClient}) always sends single-frame text messages
- * ({@code webSocket.sendText(line, true)}) - {@link #readTextMessage()} fails clearly rather than
- * silently mis-assembling a continuation it doesn't expect.
+ * Minimal RFC 6455 WebSocket frame reader/writer over a raw {@link Socket} -
+ * just enough to interoperate with {@code java.net.http.WebSocket} (the one
+ * real client {@link RemoteAdapterServer} needs to support, since both
+ * endpoints of this connection are ours). Handles text/ping/pong/close frames;
+ * deliberately does not support fragmented (multi-frame) messages - the only
+ * client here ({@code RemoteAdapterClient}) always sends single-frame text
+ * messages ({@code webSocket.sendText(line, true)}) -
+ * {@link #readTextMessage()} fails clearly rather than silently mis-assembling
+ * a continuation it doesn't expect.
  */
 final class WsFrameCodec implements Closeable {
 
@@ -38,8 +40,9 @@ final class WsFrameCodec implements Closeable {
 	}
 
 	/**
-	 * Blocks until a complete text message arrives, transparently answering pings with pongs and
-	 * ignoring pongs. Returns {@code null} on a peer-initiated close or end of stream.
+	 * Blocks until a complete text message arrives, transparently answering pings
+	 * with pongs and ignoring pongs. Returns {@code null} on a peer-initiated close
+	 * or end of stream.
 	 */
 	String readTextMessage() throws IOException {
 		while (true) {
@@ -176,7 +179,10 @@ final class WsFrameCodec implements Closeable {
 		}
 	}
 
-	/** Only used internally while assembling a request line/headers before the frame codec takes over. */
+	/**
+	 * Only used internally while assembling a request line/headers before the frame
+	 * codec takes over.
+	 */
 	static String readLine(InputStream in) throws IOException {
 		ByteArrayOutputStream buf = new ByteArrayOutputStream(128);
 		int prev = -1;

@@ -153,9 +153,8 @@ public final class RemoteAdapterClient implements AutoCloseable {
 									+ " rejected: access denied (HTTP 401) - check app.ble.remote-token; not "
 									+ "retrying, this cannot succeed without restarting with a corrected token");
 						}
-						LOG.warning(
-								"remote connection to " + serverUri + " rejected (HTTP " + status + "), retrying in "
-										+ backoff + "ms");
+						LOG.warning("remote connection to " + serverUri + " rejected (HTTP " + status
+								+ "), retrying in " + backoff + "ms");
 					} else {
 						LOG.log(Level.WARNING,
 								"remote connection to " + serverUri + " failed, retrying in " + backoff + "ms", e);

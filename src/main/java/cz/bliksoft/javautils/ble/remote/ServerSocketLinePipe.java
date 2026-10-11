@@ -8,9 +8,10 @@ import java.util.logging.Logger;
 import cz.bliksoft.javautils.ble.transport.BleLinePipe;
 
 /**
- * Adapts a raw-socket {@link WsFrameCodec} to {@link BleLinePipe}, the {@link RemoteAdapterServer}
- * equivalent of {@code StorageManagerServer}'s {@code SpringSessionLinePipe} (which adapts a Spring
- * {@code WebSocketSession} the same way) - so a connection accepted here can be registered with a
+ * Adapts a raw-socket {@link WsFrameCodec} to {@link BleLinePipe}, the
+ * {@link RemoteAdapterServer} equivalent of {@code StorageManagerServer}'s
+ * {@code SpringSessionLinePipe} (which adapts a Spring {@code WebSocketSession}
+ * the same way) - so a connection accepted here can be registered with a
  * {@code RemoteAdapterRegistry} exactly like any other transport.
  */
 final class ServerSocketLinePipe implements BleLinePipe {
@@ -52,10 +53,11 @@ final class ServerSocketLinePipe implements BleLinePipe {
 	}
 
 	/**
-	 * Blocks the calling thread reading messages until the connection closes (peer-initiated or
-	 * {@link #close()}), dispatching each to the registered line handler and firing the close handler
-	 * exactly once when it ends, with a short reason string (see {@link BleLinePipe#onClose}). Meant to
-	 * be run on its own dedicated thread per connection - see {@link RemoteAdapterServer}.
+	 * Blocks the calling thread reading messages until the connection closes
+	 * (peer-initiated or {@link #close()}), dispatching each to the registered line
+	 * handler and firing the close handler exactly once when it ends, with a short
+	 * reason string (see {@link BleLinePipe#onClose}). Meant to be run on its own
+	 * dedicated thread per connection - see {@link RemoteAdapterServer}.
 	 */
 	void runReadLoop() {
 		String reason = "remote peer closed the connection";

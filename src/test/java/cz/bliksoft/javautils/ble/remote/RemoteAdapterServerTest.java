@@ -24,12 +24,15 @@ import cz.bliksoft.javautils.ble.BleException;
 import cz.bliksoft.javautils.ble.BlePeripheral;
 
 /**
- * Real end-to-end test: a genuine {@code java.net.http.WebSocket} client (the same implementation
- * {@link RemoteAdapterClient} uses) against a real {@link RemoteAdapterServer} bound to a real loopback
- * socket, with a real {@link DefaultRemoteAdapterRegistry} - proves the hand-rolled handshake/frame codec
- * actually interoperates with a spec-compliant client in both directions, not just that it doesn't crash.
- * Mirrors {@link DefaultRemoteAdapterRegistryTest}'s own "issue a real BleAdapter command, deliver a
- * matching response" pattern, just over a real socket instead of a {@code FakeLinePipe}.
+ * Real end-to-end test: a genuine {@code java.net.http.WebSocket} client (the
+ * same implementation {@link RemoteAdapterClient} uses) against a real
+ * {@link RemoteAdapterServer} bound to a real loopback socket, with a real
+ * {@link DefaultRemoteAdapterRegistry} - proves the hand-rolled handshake/frame
+ * codec actually interoperates with a spec-compliant client in both directions,
+ * not just that it doesn't crash. Mirrors
+ * {@link DefaultRemoteAdapterRegistryTest}'s own "issue a real BleAdapter
+ * command, deliver a matching response" pattern, just over a real socket
+ * instead of a {@code FakeLinePipe}.
  */
 class RemoteAdapterServerTest {
 
@@ -89,15 +92,19 @@ class RemoteAdapterServerTest {
 			});
 			connectThread.start();
 
-			// Server -> client: BleAdapter wrote a real "connect" command through the registry-backed
-			// pipe - if it arrives here as a well-formed WebSocket text frame a real client can decode,
+			// Server -> client: BleAdapter wrote a real "connect" command through the
+			// registry-backed
+			// pipe - if it arrives here as a well-formed WebSocket text frame a real client
+			// can decode,
 			// the server's hand-rolled frame writer/masking is correct.
 			String commandLine = received.poll(5, TimeUnit.SECONDS);
 			assertEquals("connect", mapper.readTree(commandLine).get("cmd").asText());
 			String id = mapper.readTree(commandLine).get("id").asText();
 
-			// Client -> server: java.net.http.WebSocket always masks outgoing frames per RFC 6455 - if
-			// the server's frame reader unmasks correctly, this response reaches BleAdapter and
+			// Client -> server: java.net.http.WebSocket always masks outgoing frames per
+			// RFC 6455 - if
+			// the server's frame reader unmasks correctly, this response reaches BleAdapter
+			// and
 			// completes the pending connect().
 			ws.sendText("{\"type\":\"response\",\"id\":\"" + id + "\",\"ok\":true}", true).get(2, TimeUnit.SECONDS);
 			connectThread.join(2000);
@@ -114,11 +121,9 @@ class RemoteAdapterServerTest {
 		server = new RemoteAdapterServer(0, TOKEN, registry);
 		ExecutionException ex = assertThrows(ExecutionException.class, () -> {
 			server.start();
-			HttpClient.newHttpClient().newWebSocketBuilder().header("Authorization", "Bearer " + TOKEN)
-					.buildAsync(URI.create("ws://127.0.0.1:" + server.getLocalPort() + "/ble-remote"),
-							new WebSocket.Listener() {
-							})
-					.get(5, TimeUnit.SECONDS);
+			HttpClient.newHttpClient().newWebSocketBuilder().header("Authorization", "Bearer " + TOKEN).buildAsync(
+					URI.create("ws://127.0.0.1:" + server.getLocalPort() + "/ble-remote"), new WebSocket.Listener() {
+					}).get(5, TimeUnit.SECONDS);
 		});
 		assertTrue(ex.getCause() instanceof WebSocketHandshakeException);
 		assertEquals(400, ((WebSocketHandshakeException) ex.getCause()).getResponse().statusCode());
@@ -131,8 +136,8 @@ class RemoteAdapterServerTest {
 		server.start();
 
 		ExecutionException ex = assertThrows(ExecutionException.class,
-				() -> HttpClient.newHttpClient().newWebSocketBuilder()
-						.header(RemoteAdapterServer.NAME_HEADER, NAME).header("Authorization", "Bearer wrong-token")
+				() -> HttpClient.newHttpClient().newWebSocketBuilder().header(RemoteAdapterServer.NAME_HEADER, NAME)
+						.header("Authorization", "Bearer wrong-token")
 						.buildAsync(URI.create("ws://127.0.0.1:" + server.getLocalPort() + "/ble-remote"),
 								new WebSocket.Listener() {
 								})
