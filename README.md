@@ -48,6 +48,9 @@ connect dropped - and throws `BleBondRejectedException` instead of retrying. Cal
 `BlePeripheral.unpair()` to drop the stale bond, scan again (BlueZ forgets an unpaired device
 entirely) and `pair()` after the next `connect()`.
 
+`BlePeripheral.isBonded()` tells whether the OS already holds a bond for a peripheral (Windows and
+Linux, no connect needed) - e.g. to ask the user for a PIN only for a device not paired yet.
+
 ## Platform backends
 
 On Linux and macOS, every operation (scan/connect/disconnect/discover/read/write/subscribe) goes

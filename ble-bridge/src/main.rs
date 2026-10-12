@@ -68,6 +68,7 @@ enum Command {
 	RequestConnectionParameters { id: String, address: String, preset: String },
 	Pair { id: String, address: String, pin: String },
 	Unpair { id: String, address: String },
+	IsBonded { id: String, address: String },
 }
 
 struct AppState {
@@ -79,6 +80,8 @@ struct AppState {
 	/// Per address, how many links have dropped within SHORT_LINK of coming up - `connect` compares
 	/// it before and after, see BOND_REJECTED_SHORT_LINKS.
 	short_links: Mutex<HashMap<String, u32>>,
+	/// The running scan's id and service-UUID filter - see `report_device_found`.
+	scan_service_filter: Mutex<Option<(String, Uuid)>>,
 }
 
 #[tokio::main]
@@ -125,6 +128,7 @@ async fn main() {
 		notif_started: Mutex::new(HashSet::new()),
 		link_up_since: Mutex::new(HashMap::new()),
 		short_links: Mutex::new(HashMap::new()),
+		scan_service_filter: Mutex::new(None),
 	});
 
 	// Forward adapter-level discovery/connect/disconnect events for as long as the process runs.
@@ -190,7 +194,9 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 			if let Err(e) = win_gatt::ensure_scan_watcher(tx.clone(), filter.services.first().copied()) {
 				eprintln!("[ble-bridge] supplementary scan watcher init failed: {}", e);
 			}
+			*state.scan_service_filter.lock().unwrap() = filter.services.first().map(|u| (id.clone(), *u));
 			if let Err(e) = state.adapter.start_scan(filter).await {
+				state.scan_service_filter.lock().unwrap().take();
 				let _ = tx.send(err_response(&id, e.to_string()));
 				return;
 			}
@@ -201,11 +207,18 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 				let _ = state2.adapter.stop_scan().await;
 				#[cfg(target_os = "windows")]
 				win_gatt::stop_scan_watcher();
+				{
+					let mut f = state2.scan_service_filter.lock().unwrap();
+					if f.as_ref().is_some_and(|(scan_id, _)| *scan_id == id) {
+						f.take();
+					}
+				}
 				let _ = tx2.send(ok_response(&id, json!({})));
 			});
 		}
 		Command::StopScan { id } => {
 			let result = state.adapter.stop_scan().await.map(|_| json!({}));
+			state.scan_service_filter.lock().unwrap().take();
 			#[cfg(target_os = "windows")]
 			win_gatt::stop_scan_watcher();
 			respond(&tx, &id, result);
@@ -452,6 +465,14 @@ async fn handle_line(state: Arc<AppState>, tx: UnboundedSender<Value>, line: Str
 				Err(e) => err_response(&id, e),
 			});
 		}
+		// Whether the OS holds a bond for the address - e.g. so a caller asks for a PIN only for
+		// a device not paired yet. Needs no prior connect or scan. Always false on macOS.
+		Command::IsBonded { id, address } => {
+			let _ = tx.send(match platform_is_bonded(&address.to_uppercase()).await {
+				Ok(bonded) => ok_response(&id, json!({ "bonded": bonded })),
+				Err(e) => err_response(&id, e),
+			});
+		}
 	}
 }
 
@@ -525,9 +546,18 @@ fn cache_peripheral(state: &AppState, addr: &str, p: Peripheral) -> Peripheral {
 }
 
 /// `rssi` overrides the peripheral's cached properties - an RssiUpdate event carries the fresh value.
+///
+/// While a scan with a service-UUID filter runs, a device not advertising that service is left
+/// out: the filter only narrows what the OS discovers, but on BlueZ every device it already knows
+/// still gets a DeviceDiscovered when the event stream opens, and nearby ones keep sending
+/// RssiUpdate/ManufacturerData events - all of which used to reach the caller as matches.
 async fn report_device_found(state: &Arc<AppState>, tx: &UnboundedSender<Value>, id: &PeripheralId, rssi: Option<i16>) {
 	if let Ok(p) = state.adapter.peripheral(id).await {
 		if let Ok(Some(props)) = p.properties().await {
+			let wanted = state.scan_service_filter.lock().unwrap().as_ref().map(|(_, u)| *u);
+			if wanted.is_some_and(|u| !props.services.contains(&u)) {
+				return;
+			}
 			let addr = props.address.to_string().to_uppercase();
 			cache_peripheral(state, &addr, p);
 			let _ = tx.send(json!({

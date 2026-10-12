@@ -171,6 +171,17 @@ public class BlePeripheral {
 	}
 
 	/**
+	 * Whether the OS holds a bond (stored pairing keys) for this peripheral - e.g.
+	 * to ask the user for a PIN only when it isn't paired yet. Need not be
+	 * connected, nor scanned for. Windows and Linux; always {@code false} on macOS,
+	 * where the OS owns bonding.
+	 */
+	public boolean isBonded() throws BleException {
+		JsonNode resp = adapter.sendRequest("is_bonded", fields("address", address), DEFAULT_TIMEOUT_MS);
+		return resp.path("bonded").asBoolean(false);
+	}
+
+	/**
 	 * Fires whenever this peripheral drops - see {@link DisconnectListener} for the
 	 * crash-isolation case.
 	 */

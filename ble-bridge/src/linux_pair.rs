@@ -158,19 +158,49 @@ fn device_path(adapter_path: &Path<'static>, address: &str) -> Path<'static> {
 	Path::from(format!("{}/dev_{}", adapter_path, address.to_uppercase().replace(':', "_")))
 }
 
+/// How long [`pair`] waits for BlueZ to report a dropped link before pairing anyway.
+const DISCONNECT_WAIT: Duration = Duration::from_secs(5);
+/// Pause after the link is down before [`pair`] calls `Pair` - see there.
+const DISCONNECT_SETTLE: Duration = Duration::from_secs(1);
+
 pub async fn pair(address: &str, pin: &str) -> Result<(), String> {
 	let conn = ensure_agent().await?;
 	let adapter_path = find_adapter_path(&conn).await?;
 	let device_path = device_path(&adapter_path, address);
+	let device = nonblock::Proxy::new("org.bluez", device_path, DBUS_TIMEOUT, conn);
+
+	// The kernel fixes a link's SMP IO capability when the link is created: pairing over a link
+	// opened before our KeyboardOnly agent became the default (e.g. connect, then pair) uses the
+	// old default (DisplayYesNo), which against a DisplayOnly legacy peripheral (MeshCore radios)
+	// means Just Works - an unauthenticated bond such a peripheral then refuses with "Insufficient
+	// Authentication". So pair over a fresh link and restore the connection afterwards. An
+	// already-paired device skips this (Pair just answers AlreadyExists).
+	let reconnect = device.connected().await.unwrap_or(false) && !device.paired().await.unwrap_or(false);
+	if reconnect {
+		device.disconnect().await.map_err(|e| e.to_string())?;
+		let deadline = tokio::time::Instant::now() + DISCONNECT_WAIT;
+		while device.connected().await.unwrap_or(false) && tokio::time::Instant::now() < deadline {
+			tokio::time::sleep(Duration::from_millis(100)).await;
+		}
+		// BlueZ handles a disconnect twice - on the link-down event (Connected turns false) and
+		// again on the MGMT Disconnect command's completion, tens of ms later - and the second
+		// pass cancels any bonding started in between (Pair fails with AuthenticationCanceled
+		// while the kernel goes on pairing without anyone left to answer its passkey request).
+		tokio::time::sleep(DISCONNECT_SETTLE).await;
+	}
 
 	let key = address.to_uppercase();
 	PENDING_PINS.lock().unwrap().get_or_insert_with(HashMap::new).insert(key.clone(), pin.to_string());
-
-	let device = nonblock::Proxy::new("org.bluez", device_path, DBUS_TIMEOUT, conn);
 	let result = device.pair().await.map(|_| ()).map_err(|e| e.to_string());
-
 	if let Some(m) = PENDING_PINS.lock().unwrap().as_mut() {
 		m.remove(&key);
+	}
+
+	if reconnect && !device.connected().await.unwrap_or(false) {
+		let reconnected = device.connect().await.map_err(|e| format!("reconnect after pairing failed: {}", e));
+		if result.is_ok() {
+			reconnected?;
+		}
 	}
 	result
 }

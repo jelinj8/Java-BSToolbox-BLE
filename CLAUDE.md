@@ -168,7 +168,15 @@ of this library, are expected to need authenticated bonding just to talk to them
   13, BlueZ 5.82) against a real PIN-protected peripheral (a MeshCore radio) - succeeded on the
   first real attempt after one compile-error fix, confirmed bonded at the system level afterward
   (`bluetoothctl info <address>` showing `Paired: yes`/`Bonded: yes`), with zero prompt of any kind
-  on this headless machine.
+  on this headless machine. The kernel fixes a link's SMP IO capability when the link is created,
+  so pairing over a link opened before our agent became the default (connect, then pair - how
+  every caller does it) used the desktop's DisplayYesNo: against a DisplayOnly legacy peripheral
+  (MeshCore radios) that is Just Works, an unauthenticated bond the radio then refuses with
+  "Insufficient Authentication". `pair()` therefore drops the link of a connected, unpaired device,
+  pairs over a fresh one and reconnects - waiting ~1s after the link is down first, as BlueZ
+  processes a disconnect twice and its second pass cancels a bonding started in between
+  (AuthenticationCanceled, with the kernel left asking an agent that has no PIN anymore).
+  Confirmed with btmon on a uConsole (CM5) and a Dell laptop, BlueZ 5.82.
 - **macOS**: not possible, permanently, via any public API - not a "not yet". CoreBluetooth has no
   way for an app to supply a BLE pairing passkey/PIN programmatically (unlike Android's
   `BluetoothDevice.setPin()`, or the Windows/Linux APIs this project already uses), and no way to
@@ -212,6 +220,9 @@ its settings on every restart left BSMeshcoreCompanion retrying forever.
   `DeviceInformationPairing.UnpairAsync`. Needs no prior connect or scan; an unknown or unpaired
   device succeeds. Not on macOS (the OS owns bonding there), nor in the ESP32 remote-bridge
   firmware yet.
+- **`is_bonded`** (`{"cmd":"is_bonded","id":...,"address":...}` -> `{"bonded":bool}`): the same
+  `platform_is_bonded` check, for a caller that asks for a PIN only when a device isn't paired yet
+  (`BlePeripheral.isBonded()`). Needs no prior connect or scan; always false on macOS.
 
 ## Release process
 
